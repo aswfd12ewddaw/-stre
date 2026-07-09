@@ -1,0 +1,119 @@
+name: Quark To Streamtape Express
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: '请输入夸克直链或整段 cURL 下载命令'
+        required: true
+        default: ''
+      video_name:
+        description: '给保存的视频起个名字 (带 .mp4 后缀)'
+        required: true
+        default: 'video.mp4'
+
+jobs:
+  download_and_upload:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Environment & Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y aria2 curl jq
+
+    - name: Run Intelligent Downloader & Streamtape Uploader
+      env:
+        ST_LOGIN: ${{ secrets.ST_LOGIN }}
+        ST_KEY: ${{ secrets.ST_KEY }}
+        RAW_INPUT: ${{ github.event.inputs.video_url }}
+        VIDEO_NAME: ${{ github.event.inputs.video_name }}
+      run: |
+        python - <<EOF
+        import os
+        import sys
+        import re
+        import subprocess
+        import json
+
+        raw_input = os.environ['RAW_INPUT'].strip()
+        video_name = os.environ['VIDEO_NAME'].strip()
+        
+        if not video_name.lower().endswith('.mp4'):
+            video_name += '.mp4'
+
+        target_url = ""
+        cookie_str = ""
+
+        if raw_input.startswith("curl"):
+            print("🚀 检测到您输入的是整段 cURL 命令，正在智能提取关键参数...")
+            url_match = re.search(r'(https?://[^\s"\']+)', raw_input)
+            if url_match:
+                target_url = url_match.group(1)
+            
+            cookie_match = re.search(r'(?:-b|--cookie)\s+["\']?([^"\']+)["\']?', raw_input)
+            if cookie_match:
+                cookie_str = cookie_match.group(1)
+        else:
+            target_url = raw_input
+
+        if not target_url:
+            print("❌ 错误：无法从输入中提取到有效的视频 URL 链接！")
+            sys.exit(1)
+
+        print("📥 正在启动 Aria2 开启 64 线程暴力冲破夸克限速...")
+        aria2_cmd = [
+            'aria2c', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
+            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-o', video_name
+        ]
+        if cookie_str:
+            aria2_cmd.append(f'--header=Cookie: {cookie_str}')
+            print("🔑 已成功将夸克身份凭证注入 Aria2 请求头。")
+            
+        aria2_cmd.append(target_url)
+        subprocess.run(aria2_cmd, check=True)
+
+        if not os.path.exists(video_name) or os.path.getsize(video_name) < 1024:
+            print("❌ 错误：视频文件下载失败，Aria2 未能成功保存文件！")
+            sys.exit(1)
+
+        file_size_mb = os.path.getsize(video_name) / (1024 * 1024)
+        print(f"🎯 文件下载完成！本地大小: {file_size_mb:.2f} MB")
+
+        print("🔍 正在请求 Streamtape 上传网关服务器...")
+        st_login = os.environ['ST_LOGIN']
+        st_key = os.environ['ST_KEY']
+        
+        api_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
+        try:
+            api_res = subprocess.check_output(['curl', '-s', api_url]).decode('utf-8')
+            res_data = json.loads(api_res)
+            
+            if res_data.get('status') == 200:
+                upload_target_url = res_data['result']['url']
+                print("✅ 成功获取上传网关，正在全力推流至 Streamtape 存储节点...")
+                
+                upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', upload_target_url]
+                upload_res = subprocess.check_output(upload_cmd).decode('utf-8')
+                
+                print("\n--- 📈 Streamtape 接口返回报告 ---")
+                print(upload_res)
+                print("---------------------------------")
+                
+                upload_res_data = json.loads(upload_res)
+                if upload_res_data.get('status') == 200:
+                    print(f"🎉 恭喜！《{video_name}》已完美同步至 Streamtape 空间！")
+                else:
+                    print("⚠️ 上传可能遇到异常，请检查上方返回的 JSON 数据。")
+            else:
+                print(f"❌ 错误：Streamtape API 认证失败！原因: {res_data.get('msg')}")
+                sys.exit(1)
+                
+        except Exception as e:
+            print(f"❌ 传输过程中发生未预期异常: {e}")
+            sys.exit(1)
+        EOF
