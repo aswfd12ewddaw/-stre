@@ -1,0 +1,171 @@
+name: Quark To Streamtape Express (64 Threads Enhanced)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: '请输入夸克直链或整段 cURL 下载命令'
+        required: true
+        default: ''
+      video_name:
+        description: '给保存的视频起个名字 (带 .mp4 后缀)'
+        required: true
+        default: 'video.mp4'
+
+jobs:
+  download_and_upload:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # 【核心修改点】：不再用 apt-get 安装原版，而是直接下载免安装的 128线程 增强版
+    - name: Set up Enhanced Aria2 & Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl jq
+        
+        # 下载第三方预编译好的 Aria2 增强版（静态二进制文件）
+        echo "📥 正在配置 64/128 线程解锁版 Aria2..."
+        curl -b "b-user-id=7503b963" -L -o aria2c_enhanced "https://github.com/q3a/aria2-static-builds/releases/download/v1.36.0/aria2-1.36.0-linux-gnu-64bit-build1.tar.bz2"
+        tar -xjf aria2c_enhanced
+        # 把解压出来的增强版程序移动到系统全局变量中，命名为 aria2c-git
+        mv aria2-1.36.0-linux-gnu-64bit-build1/aria2c ./aria2c-git
+        chmod +x ./aria2c-git
+        sudo mv ./aria2c-git /usr/local/bin/aria2c-git
+        echo "✅ 解锁版 Aria2 配置成功！"
+
+    - name: Create Python Script File
+      run: |
+        cat << 'EOF' > script.py
+        import os
+        import sys
+        import re
+        import subprocess
+        import json
+        import time
+
+        raw_input = os.environ['RAW_INPUT'].strip()
+        video_name = os.environ['VIDEO_NAME'].strip()
+        
+        if not video_name.lower().endswith('.mp4'):
+            video_name += '.mp4'
+
+        target_url = ""
+        cookie_str = ""
+
+        if raw_input.startswith("curl"):
+            print("🚀 检测到您输入的是整段 cURL 命令，正在智能提取关键参数...")
+            url_match = re.search(r'(https?://[^\s"\']+)', raw_input)
+            if url_match:
+                target_url = url_match.group(1)
+            
+            cookie_match = re.search(r'(?:-b|--cookie)\s+["\']?([^"\']+)["\']?', raw_input)
+            if cookie_match:
+                cookie_str = cookie_match.group(1)
+        else:
+            target_url = raw_input
+
+        if not target_url:
+            print("❌ 错误：无法从输入中提取到有效的视频 URL 链接！")
+            sys.exit(1)
+
+        print("📥 正在启动【解锁版Aria2】开启 64 线程暴力冲破夸克限速...")
+        # 此时 -x 64 和 -s 64 将完美运行，不会再被系统拦截报错了
+        aria2_cmd = [
+            'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
+            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-o', video_name
+        ]
+        if cookie_str:
+            aria2_cmd.append(f'--header=Cookie: {cookie_str}')
+            print("🔑 已成功将夸克身份凭证注入 Aria2 请求头。")
+            
+        aria2_cmd.append(target_url)
+        subprocess.run(aria2_cmd, check=True)
+
+        if not os.path.exists(video_name) or os.path.getsize(video_name) < 1024:
+            print("❌ 错误：视频文件下载失败，Aria2 未能成功保存文件！")
+            sys.exit(1)
+
+        file_size_mb = os.path.getsize(video_name) / (1024 * 1024)
+        print(f"🎯 文件下载完成！本地大小: {file_size_mb:.2f} MB")
+
+        print("🔍 正在请求 Streamtape 上传网关服务器 (智能抗限流重试机制)...")
+        st_login = os.environ['ST_LOGIN']
+        st_key = os.environ['ST_KEY']
+        api_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
+        
+        upload_target_url = ""
+        max_retries = 5
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"🔄 正在尝试请求网关地址 [第 {attempt}/{max_retries} 次]...")
+                api_res = subprocess.check_output(['curl', '-s', '-m', '30', api_url]).decode('utf-8')
+                
+                if not api_res.strip().startswith('{'):
+                    print(f"⚠️ 警告：服务器返回了非 JSON 数据，等待 5 秒后重试。原文: {api_res}")
+                    time.sleep(5)
+                    continue
+                    
+                res_data = json.loads(api_res)
+                status_code = res_data.get('status')
+                
+                if status_code == 200:
+                    upload_target_url = res_data['result']['url']
+                    print("✅ 成功冲破限流，成功获取专属上传网关！")
+                    break
+                    
+                elif status_code == 403 or "IP limit reached" in str(res_data):
+                    print(f"⚠️ 触发 Streamtape 接口 IP 限流保护，当前处于风控排队中。")
+                    if attempt < max_retries:
+                        sleep_time = 4 * attempt
+                        print(f"⏳ 正在睡眠延迟 {sleep_time} 秒后再次冲锋...")
+                        time.sleep(sleep_time)
+                    else:
+                        print("❌ 已经连续重试了 5 次依然被拒绝，Streamtape 此时风控极严格，任务安全终止。")
+                        sys.exit(1)
+                else:
+                    print(f"❌ 接口明确拒绝请求！错误原因: {res_data.get('msg')}")
+                    sys.exit(1)
+                    
+            except Exception as e:
+                print(f"⚠️ 请求发生异常: {e}，等待 5 秒重试。")
+                time.sleep(5)
+                
+        if not upload_target_url:
+            print("❌ 错误：未能成功拿到上传网关，流程终止。")
+            sys.exit(1)
+
+        try:
+            print("📦 正在全力推流至 Streamtape 存储节点...")
+            upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', upload_target_url]
+            upload_res = subprocess.check_output(upload_cmd).decode('utf-8')
+            
+            print("\n--- 📈 Streamtape 接口返回报告 ---")
+            print(upload_res)
+            print("---------------------------------")
+            
+            if upload_res.strip().startswith('{'):
+                upload_res_data = json.loads(upload_res)
+                if upload_res_data.get('status') == 200:
+                    print(f"🎉 恭喜！《{video_name}》已完美同步至 Streamtape 空间！")
+                else:
+                    print("⚠️ 上传可能遇到异常，请检查上方返回的 JSON 数据。")
+            else:
+                print("⚠️ 上传结束，但网关未返回标准 JSON，请去 Streamtape 后台网页刷新看文件是否已在。")
+                
+        except Exception as e:
+            print(f"❌ 传输过程中发生未预期异常: {e}")
+            sys.exit(1)
+        EOF
+
+    - name: Execute Intelligent Sync
+      env:
+        ST_LOGIN: ${{ secrets.ST_LOGIN }}
+        ST_KEY: ${{ secrets.ST_KEY }}
+        RAW_INPUT: ${{ github.event.inputs.video_url }}
+        VIDEO_NAME: ${{ github.event.inputs.video_name }}
+      run: python script.py
