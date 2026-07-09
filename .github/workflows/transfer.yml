@@ -1,4 +1,4 @@
-name: Quark To Streamtape Express (Debug Version)
+name: Quark To Streamtape Express (Anti-Limit Version)
 
 on:
   workflow_dispatch:
@@ -38,6 +38,7 @@ jobs:
         import re
         import subprocess
         import json
+        import time
 
         raw_input = os.environ['RAW_INPUT'].strip()
         video_name = os.environ['VIDEO_NAME'].strip()
@@ -84,48 +85,77 @@ jobs:
         file_size_mb = os.path.getsize(video_name) / (1024 * 1024)
         print(f"🎯 文件下载完成！本地大小: {file_size_mb:.2f} MB")
 
-        print("🔍 正在请求 Streamtape 上传网关服务器...")
+        print("🔍 正在请求 Streamtape 上传网关服务器 (加入了智能抗限流重试机制)...")
         st_login = os.environ['ST_LOGIN']
         st_key = os.environ['ST_KEY']
-        
         api_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
-        try:
-            # 增加了 -i 参数来抓取一部分响应头，并设置超时防死锁
-            api_res = subprocess.check_output(['curl', '-s', '-m', '30', api_url]).decode('utf-8')
-            
-            # 拦截测试：如果返回的内容根本不是以 { 开头，直接打印原文告警
-            if not api_res.strip().startswith('{'):
-                print("❌ 致命错误：Streamtape 没有返回预期的 JSON 数据！")
-                print("📋 以下为 Streamtape 接口返回的服务器原始文本（请根据此内容排查密钥或防火墙问题）：")
-                print("--------------------------------------------------")
-                print(api_res)
-                print("--------------------------------------------------")
-                sys.exit(1)
-
-            res_data = json.loads(api_res)
-            
-            if res_data.get('status') == 200:
-                upload_target_url = res_data['result']['url']
-                print("✅ 成功获取上传网关，正在全力推流至 Streamtape 存储节点...")
+        
+        upload_target_url = ""
+        max_retries = 5  # 最大重试 5 次
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"🔄 正在尝试请求网关地址 [第 {attempt}/{max_retries} 次]...")
+                api_res = subprocess.check_output(['curl', '-s', '-m', '30', api_url]).decode('utf-8')
                 
-                upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', upload_target_url]
-                upload_res = subprocess.check_output(upload_cmd).decode('utf-8')
+                # 如果连最基本的 JSON 结构都没有返回，说明可能彻底被拦截，提前打印
+                if not api_res.strip().startswith('{'):
+                    print(f"⚠️ 警告：服务器返回了非 JSON 数据，等待 5 秒后重试。原文: {api_res}")
+                    time.sleep(5)
+                    continue
+                    
+                res_data = json.loads(api_res)
+                status_code = res_data.get('status')
                 
-                print("\n--- 📈 Streamtape 接口返回报告 ---")
-                print(upload_res)
-                print("---------------------------------")
-                
-                if upload_res.strip().startswith('{'):
-                    upload_res_data = json.loads(upload_res)
-                    if upload_res_data.get('status') == 200:
-                        print(f"🎉 恭喜！《{video_name}》已完美同步至 Streamtape 空间！")
+                # 情况 1：拿到了 200，大功告成，跳出循环
+                if status_code == 200:
+                    upload_target_url = res_data['result']['url']
+                    print("✅ 成功冲破限流，成功获取专属上传网关！")
+                    break
+                    
+                # 情况 2：触发了 403 或者是你的 IP 限流错误
+                elif status_code == 403 or "IP limit reached" in str(res_data):
+                    print(f"⚠️ 触发 Streamtape 接口 IP 限流保护，当前处于风控排队中。")
+                    print(f"📋 接口提示: {res_data.get('msg')} -> {res_data.get('result')}")
+                    if attempt < max_retries:
+                        sleep_time = 4 * attempt  # 梯级增加等待时间：4秒、8秒、12秒...
+                        print(f"⏳ 正在睡眠延迟 {sleep_time} 秒后再次冲锋...")
+                        time.sleep(sleep_time)
                     else:
-                        print("⚠️ 上传可能遇到异常，请检查上方返回的 JSON 数据。")
+                        print("❌ 已经连续重试了 5 次依然被拒绝，Streamtape 此时风控极严格，任务安全终止。")
+                        sys.exit(1)
                 else:
-                    print("⚠️ 上传结束，但网关未返回标准 JSON，请去 Streamtape 后台网页刷新看文件是否已在。")
+                    print(f"❌ 接口明确拒绝请求！错误原因: {res_data.get('msg')}")
+                    sys.exit(1)
+                    
+            except Exception as e:
+                print(f"⚠️ 请求发生异常: {e}，等待 5 秒重试。")
+                time.sleep(5)
+                
+        if not upload_target_url:
+            print("❌ 错误：未能成功拿到上传网关，流程终止。")
+            sys.exit(1)
+
+        # ----------------------------------------------------------------
+        # ☁️ 开始推流上传
+        # ----------------------------------------------------------------
+        try:
+            print("📦 正在全力推流至 Streamtape 存储节点...")
+            upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', upload_target_url]
+            upload_res = subprocess.check_output(upload_cmd).decode('utf-8')
+            
+            print("\n--- 📈 Streamtape 接口返回报告 ---")
+            print(upload_res)
+            print("---------------------------------")
+            
+            if upload_res.strip().startswith('{'):
+                upload_res_data = json.loads(upload_res)
+                if upload_res_data.get('status') == 200:
+                    print(f"🎉 恭喜！《{video_name}》已完美同步至 Streamtape 空间！")
+                else:
+                    print("⚠️ 上传可能遇到异常，请检查上方返回的 JSON 数据。")
             else:
-                print(f"❌ 错误：Streamtape API 认证拒绝！原因: {res_data.get('msg')}")
-                sys.exit(1)
+                print("⚠️ 上传结束，但网关未返回标准 JSON，请去 Streamtape 后台网页刷新看文件是否已在。")
                 
         except Exception as e:
             print(f"❌ 传输过程中发生未预期异常: {e}")
