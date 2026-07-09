@@ -1,4 +1,4 @@
-name: Quark To Streamtape Express (Precheck & Fast Sync)
+name: Quark To Streamtape Express (Ultimate Fixed Cache)
 
 on:
   workflow_dispatch:
@@ -20,34 +20,41 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 1. 引入缓存
+    # 【彻底修复核心】：更改缓存 key 为 v2，强制抛弃之前坏掉的旧残留，重新编译干净的解锁版
     - name: Cache Enhanced Aria2
       id: cache-aria2
       uses: actions/cache@v4
       with:
         path: /home/runner/aria2_bin
-        key: aria2-enhanced-1.37.0-v1
+        key: aria2-enhanced-1.37.0-v2
 
-    # 2. 如果没缓存才编译
+    # 如果缓存没命中（也就是这一次），会原地重新编译真正解锁了 128 线程的成品
     - name: Compile Unlocked Aria2 From Source (Only run if no cache)
       if: steps.cache-aria2.outputs.cache-hit != 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y gcc g++ make pkg-config libssl-dev libxml2-dev zlib1g-dev libsqlite3-dev curl jq
+        
+        echo "🛠️ 正在重新拉取标准 Aria2 源码进行线程限制解锁编译..."
         curl -L -o aria2.tar.gz https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.gz
         tar -xzf aria2.tar.gz
         cd aria2-1.37.0
+        
+        echo "🔓 正在解除 16 线程限制，注入 128 线程高并发权限..."
         sed -i 's/A_MAX_NUM_CONNECTION_PER_SERVER = 16/A_MAX_NUM_CONNECTION_PER_SERVER = 128/g' src/OptionHandlerImpl.cc
+        
         ./configure --without-gnutls --with-openssl
         make -j$(nproc)
+        
         mkdir -p /home/runner/aria2_bin
         cp src/aria2c /home/runner/aria2_bin/aria2c-git
+        echo "✅ 真正的 128 线程解锁版编译完成，成功打包新缓存！"
 
     - name: Enable Unlocked Aria2
       run: |
         sudo cp /home/runner/aria2_bin/aria2c-git /usr/local/bin/aria2c-git
         sudo chmod +x /usr/local/bin/aria2c-git
-        echo "🚀 解锁版 Aria2 准备就绪！"
+        echo "🚀 真正的解锁版 Aria2 准备就绪！"
 
     - name: Create Python Script File
       run: |
@@ -70,12 +77,6 @@ jobs:
         # ----------------------------------------------------------------
         print("🕵️ 正在启动 Pre-flight Check，测试当前虚拟机与 Streamtape 的连通性...")
         try:
-            # 向主推流节点发送一个轻量级的 HEAD 请求，只拿响应头不拿数据，耗时不到 0.5 秒
-            check_res = subprocess.run(
-                ['curl', '-s', '-I', '-m', '10', 'https://push.streamtape.com/'], 
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            # 或者是请求一个最基础的账户状态 API (不管 key 错没错，只要能通就代表没被 403 连坐)
             api_ping = subprocess.check_output(
                 ['curl', '-s', '-m', '10', f'https://api.streamtape.com/account/info?login={st_login}&key=test'],
                 stderr=subprocess.STDOUT
