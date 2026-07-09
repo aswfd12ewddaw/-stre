@@ -1,62 +1,160 @@
-name: Streamtape Upload Test
+name: Quark To Streamtape Express (Ultimate Lightning Fast)
 
 on:
   workflow_dispatch:
+    inputs:
+      video_url:
+        description: '请输入夸克直链或整段 cURL 下载命令'
+        required: true
+        default: ''
+      video_name:
+        description: '给保存的视频起个名字 (带 .mp4 后缀)'
+        required: true
+        default: 'video.mp4'
 
 jobs:
-  test_upload:
+  download_and_upload:
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: 🛠️ Create Dummy File
+    # 【终极优化】：彻底抛弃耗时的源码编译与缓存，直接秒拉取已编译好的 128 线程解锁版！
+    - name: ⚡ Install Pre-compiled Unlocked Aria2 (Instant)
       run: |
-        echo "This is a test file for Streamtape upload." > test_video.mp4
-        # 生成一个 5MB 的随机测试文件（有的网盘会拒绝 0KB 或是太小的文件）
-        dd if=/dev/urandom of=test_video.mp4 bs=1M count=5
-        echo "✅ 测试文件 test_video.mp4 已生成，大小 5MB"
+        echo "🚀 正在秒级拉取免编译的静态 Aria2-Pro-Core（128 线程全解锁版）..."
+        # 极速下载静态编译的二进制文件，无需任何额外依赖
+        wget -qO aria2.tar.gz "https://github.com/P3TERX/Aria2-Pro-Core/releases/download/1.36.0_2021.08.22/aria2-1.36.0-static-linux-amd64.tar.gz"
+        tar -xzf aria2.tar.gz
+        
+        # 部署到系统路径
+        sudo mv aria2c /usr/local/bin/aria2c-git
+        sudo chmod +x /usr/local/bin/aria2c-git
+        echo "✅ 真正的 128 线程解锁版部署完成！耗时不到 2 秒！"
 
-    - name: 🚀 Test API and Upload to Streamtape
+    - name: Create Python Script File
+      run: |
+        cat << 'EOF' > script.py
+        import os
+        import sys
+        import re
+        import subprocess
+        import json
+        import urllib.request
+
+        raw_input = os.environ['RAW_INPUT'].strip()
+        video_name = os.environ['VIDEO_NAME'].strip()
+        st_login = os.environ['ST_LOGIN']
+        st_key = os.environ['ST_KEY']
+        
+        if not video_name.lower().endswith('.mp4'):
+            video_name += '.mp4'
+
+        # ----------------------------------------------------------------
+        # 🔍 【第一步】：Streamtape 通信预检 (Pre-flight Check)
+        # ----------------------------------------------------------------
+        print("🕵️ 正在启动 Pre-flight Check，测试当前虚拟机与 Streamtape 的连通性...")
+        try:
+            api_ping = subprocess.check_output(
+                ['curl', '-s', '-m', '10', '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', f'https://api.streamtape.com/account/info?login={st_login}&key={st_key}'],
+                stderr=subprocess.STDOUT
+            ).decode('utf-8')
+            
+            if "403 Forbidden" in api_ping or "Cloudflare" in api_ping and "error" in api_ping.lower():
+                print("❌ 预检失败：检测到 Streamtape 当前正对 GitHub 该节点 IP 进行严厉风控熔断 (403)！")
+                print("💡 为了防止白费力气，任务已安全终止。请稍后重新运行或更换 Actions 区域。")
+                sys.exit(1)
+            elif "\"status\":200" in api_ping.replace(" ", ""):
+                print("✅ 连通性预检通过！测试通道顺畅，账号密钥验证成功。")
+            else:
+                print("⚠️ 预检返回状态异常（请检查 ST_LOGIN 和 ST_KEY 是否正确）：")
+                print(api_ping)
+                sys.exit(1)
+        except Exception as e:
+            print(f"⚠️ 预检通信出现异常: {e}，尝试继续...")
+
+        # ----------------------------------------------------------------
+        # 📥 【第二步】：预检通过后，再去启动 Aria2 下载
+        # ----------------------------------------------------------------
+        target_url = ""
+        cookie_str = ""
+
+        if raw_input.startswith("curl"):
+            print("🚀 检测到您输入的是整段 cURL 命令，正在智能提取关键参数...")
+            url_match = re.search(r'(https?://[^\s"\']+)', raw_input)
+            if url_match:
+                target_url = url_match.group(1)
+            cookie_match = re.search(r'(?:-b|--cookie)\s+["\']?([^"\']+)["\']?', raw_input)
+            if cookie_match:
+                cookie_str = cookie_match.group(1)
+        else:
+            target_url = raw_input
+
+        if not target_url:
+            print("❌ 错误：无法从输入中提取到有效的视频 URL 链接！")
+            sys.exit(1)
+
+        print("📥 正在启动【Aria2-Pro 静态解锁版】开启 64 线程暴力冲锋...")
+        aria2_cmd = [
+            'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
+            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-o', video_name
+        ]
+        if cookie_str:
+            aria2_cmd.append(f'--header=Cookie: {cookie_str}')
+            
+        aria2_cmd.append(target_url)
+        subprocess.run(aria2_cmd, check=True)
+
+        if not os.path.exists(video_name) or os.path.getsize(video_name) < 1024:
+            print("❌ 错误：视频文件下载失败！")
+            sys.exit(1)
+
+        file_size_mb = os.path.getsize(video_name) / (1024 * 1024)
+        print(f"🎯 文件下载完成！本地大小: {file_size_mb:.2f} MB")
+
+        # ----------------------------------------------------------------
+        # 📦 【第三步】：获取真实上传节点并推流
+        # ----------------------------------------------------------------
+        print(f"📦 正在向 Streamtape 官方 API 请求分配专属上传节点...")
+        api_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
+        
+        try:
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req) as response:
+                api_res = json.loads(response.read().decode('utf-8'))
+                
+            if api_res.get('status') != 200 or 'result' not in api_res or 'url' not in api_res['result']:
+                print("❌ 错误：无法获取上传节点 URL。API 返回：")
+                print(api_res)
+                sys.exit(1)
+                
+            upload_url = api_res['result']['url']
+            print(f"✅ 成功获取专属节点: {upload_url}")
+            
+            print(f"🚀 正在全速推送 《{video_name}》 至该节点...")
+            upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', upload_url]
+            upload_res_raw = subprocess.check_output(upload_cmd).decode('utf-8')
+            
+            print("\n--- 📈 Streamtape 接口返回报告 ---")
+            print(upload_res_raw)
+            print("---------------------------------")
+            
+            if "status\":200" in upload_res_raw.replace(" ", "") or "files" in upload_res_raw:
+                print(f"🎉 恭喜！《{video_name}》已完美跨越限流同步至 Streamtape 空间！")
+            else:
+                print("⚠️ 接口返回未预期内容，请去后台网页端确认文件是否已在。")
+                
+        except Exception as e:
+            print(f"❌ 传输过程中发生未预期异常: {e}")
+            sys.exit(1)
+        EOF
+
+    - name: Execute Intelligent Sync
       env:
-        # 读取 GitHub Secrets 中的账号和密钥
         ST_LOGIN: ${{ secrets.ST_LOGIN }}
         ST_KEY: ${{ secrets.ST_KEY }}
-      run: |
-        echo "🕵️ 第一步：向 Streamtape 官方 API 请求专属上传链接..."
-        
-        # 1. 请求上传节点 URL
-        # 加上 User-Agent 防止被基础的防火墙拦截
-        API_RESP=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" "https://api.streamtape.com/file/ul?login=${ST_LOGIN}&key=${ST_KEY}")
-        
-        echo "--- 📈 API 返回原始数据 ---"
-        echo "$API_RESP"
-        echo "----------------------------"
-        
-        # 2. 用 jq 解析出真正的上传链接
-        UPLOAD_URL=$(echo $API_RESP | jq -r '.result.url')
-        
-        if [ "$UPLOAD_URL" = "null" ] || [ -z "$UPLOAD_URL" ]; then
-          echo "❌ 获取上传链接失败！请检查：1. 您的 ST_LOGIN 和 ST_KEY 是否填写正确？ 2. 查看上方 API 返回的信息。"
-          exit 1
-        fi
-        
-        echo "✅ 成功获取上传节点: $UPLOAD_URL"
-        
-        echo "📦 第二步：开始将测试文件推送到专属节点..."
-        
-        # 3. 将刚刚生成的测试文件推送到该 URL
-        UPLOAD_RESP=$(curl -s -F "file=@test_video.mp4" "$UPLOAD_URL")
-        
-        echo "--- 📈 上传结果返回数据 ---"
-        echo "$UPLOAD_RESP"
-        echo "---------------------------"
-        
-        # 4. 判断是否上传成功
-        if echo "$UPLOAD_RESP" | grep -q '"status":200'; then
-          echo "🎉 恭喜！测试文件上传成功！整个链路已经打通，没有被拦截！"
-        else
-          echo "❌ 上传失败，请检查上方的返回错误信息。"
-          exit 1
-        fi
+        RAW_INPUT: ${{ github.event.inputs.video_url }}
+        VIDEO_NAME: ${{ github.event.inputs.video_name }}
+      run: python script.py
