@@ -1,4 +1,4 @@
-name: Quark To Streamtape Express
+name: Quark To Streamtape Express (Debug Version)
 
 on:
   workflow_dispatch:
@@ -90,7 +90,18 @@ jobs:
         
         api_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
         try:
-            api_res = subprocess.check_output(['curl', '-s', api_url]).decode('utf-8')
+            # 增加了 -i 参数来抓取一部分响应头，并设置超时防死锁
+            api_res = subprocess.check_output(['curl', '-s', '-m', '30', api_url]).decode('utf-8')
+            
+            # 拦截测试：如果返回的内容根本不是以 { 开头，直接打印原文告警
+            if not api_res.strip().startswith('{'):
+                print("❌ 致命错误：Streamtape 没有返回预期的 JSON 数据！")
+                print("📋 以下为 Streamtape 接口返回的服务器原始文本（请根据此内容排查密钥或防火墙问题）：")
+                print("--------------------------------------------------")
+                print(api_res)
+                print("--------------------------------------------------")
+                sys.exit(1)
+
             res_data = json.loads(api_res)
             
             if res_data.get('status') == 200:
@@ -104,13 +115,16 @@ jobs:
                 print(upload_res)
                 print("---------------------------------")
                 
-                upload_res_data = json.loads(upload_res)
-                if upload_res_data.get('status') == 200:
-                    print(f"🎉 恭喜！《{video_name}》已完美同步至 Streamtape 空间！")
+                if upload_res.strip().startswith('{'):
+                    upload_res_data = json.loads(upload_res)
+                    if upload_res_data.get('status') == 200:
+                        print(f"🎉 恭喜！《{video_name}》已完美同步至 Streamtape 空间！")
+                    else:
+                        print("⚠️ 上传可能遇到异常，请检查上方返回的 JSON 数据。")
                 else:
-                    print("⚠️ 上传可能遇到异常，请检查上方返回的 JSON 数据。")
+                    print("⚠️ 上传结束，但网关未返回标准 JSON，请去 Streamtape 后台网页刷新看文件是否已在。")
             else:
-                print(f"❌ 错误：Streamtape API 认证失败！原因: {res_data.get('msg')}")
+                print(f"❌ 错误：Streamtape API 认证拒绝！原因: {res_data.get('msg')}")
                 sys.exit(1)
                 
         except Exception as e:
