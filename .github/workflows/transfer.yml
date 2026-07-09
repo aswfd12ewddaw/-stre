@@ -20,13 +20,13 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 【彻底修复核心】：更改缓存 key 为 v2，强制抛弃之前坏掉的旧残留，重新编译干净的解锁版
+    # 【彻底修复核心】：更改缓存 key 为 v3，强制抛弃之前坏掉的旧残留，重新编译干净的解锁版
     - name: Cache Enhanced Aria2
       id: cache-aria2
       uses: actions/cache@v4
       with:
         path: /home/runner/aria2_bin
-        key: aria2-enhanced-1.37.0-v2
+        key: aria2-enhanced-1.37.0-v3
 
     # 如果缓存没命中（也就是这一次），会原地重新编译真正解锁了 128 线程的成品
     - name: Compile Unlocked Aria2 From Source (Only run if no cache)
@@ -41,7 +41,8 @@ jobs:
         cd aria2-1.37.0
         
         echo "🔓 正在解除 16 线程限制，注入 128 线程高并发权限..."
-        sed -i 's/A_MAX_NUM_CONNECTION_PER_SERVER = 16/A_MAX_NUM_CONNECTION_PER_SERVER = 128/g' src/OptionHandlerImpl.cc
+        # 【修改点】：在 1.37.0 中，限制在 OptionHandlerFactory.cc 里，精确替换
+        sed -i "s/\"1\", 1, 16, 'x'/\"1\", 1, 128, 'x'/g" src/OptionHandlerFactory.cc
         
         ./configure --without-gnutls --with-openssl
         make -j$(nproc)
