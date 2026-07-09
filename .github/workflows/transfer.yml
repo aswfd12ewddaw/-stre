@@ -61,9 +61,10 @@ jobs:
             print("❌ 错误：无法从输入中提取到有效的视频 URL 链接！")
             sys.exit(1)
 
-        print("📥 正在启动 Aria2 开启 64 线程暴力冲破夸克限速...")
+        print("📥 正在启动 Aria2 开启高速多线程冲破夸克限速...")
+        # 修复核心：将单服务器最大连接 -x 调整为官方合规的最高 16，总连接 -s 保持 64
         aria2_cmd = [
-            'aria2c', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
+            'aria2c', '-s', '64', '-x', '16', '--min-split-size=1M', '-k', '1M',
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             '-o', video_name
         ]
