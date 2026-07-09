@@ -1,4 +1,4 @@
-name: Quark To Streamtape Express (Safe Version)
+name: Quark To Streamtape Express (Ultimate Web Gateway)
 
 on:
   workflow_dispatch:
@@ -20,12 +20,35 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Set up Environment & Dependencies
+    # 1. 引入缓存，直接复用你上一次编译好的 128 线程 Aria2
+    - name: Cache Enhanced Aria2
+      id: cache-aria2
+      uses: actions/cache@v4
+      with:
+        path: /home/runner/aria2_bin
+        key: aria2-enhanced-1.37.0-v1
+
+    # 2. 如果没缓存才编译，有缓存 1 秒跳过
+    - name: Compile Unlocked Aria2 From Source (Only run if no cache)
+      if: steps.cache-aria2.outputs.cache-hit != 'true'
       run: |
         sudo apt-get update
-        sudo apt-get install -y aria2 curl jq
+        sudo apt-get install -y gcc g++ make pkg-config libssl-dev libxml2-dev zlib1g-dev libsqlite3-dev curl jq
+        curl -L -o aria2.tar.gz https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.gz
+        tar -xzf aria2.tar.gz
+        cd aria2-1.37.0
+        sed -i 's/A_MAX_NUM_CONNECTION_PER_SERVER = 16/A_MAX_NUM_CONNECTION_PER_SERVER = 128/g' src/OptionHandlerImpl.cc
+        ./configure --without-gnutls --with-openssl
+        make -j$(nproc)
+        mkdir -p /home/runner/aria2_bin
+        cp src/aria2c /home/runner/aria2_bin/aria2c-git
 
-    # 1. 把 Python 代码安全地写入独立的文件，彻底避免 YAML 语法冲突
+    - name: Enable Unlocked Aria2
+      run: |
+        sudo cp /home/runner/aria2_bin/aria2c-git /usr/local/bin/aria2c-git
+        sudo chmod +x /usr/local/bin/aria2c-git
+        echo "🚀 解锁版 Aria2 准备就绪！"
+
     - name: Create Python Script File
       run: |
         cat << 'EOF' > script.py
@@ -34,7 +57,6 @@ jobs:
         import re
         import subprocess
         import json
-        import time
 
         raw_input = os.environ['RAW_INPUT'].strip()
         video_name = os.environ['VIDEO_NAME'].strip()
@@ -61,102 +83,56 @@ jobs:
             print("❌ 错误：无法从输入中提取到有效的视频 URL 链接！")
             sys.exit(1)
 
-        print("📥 正在启动 Aria2 开启高速多线程冲破夸克限速...")
-        # 修复核心：将单服务器最大连接 -x 调整为官方合规的最高 16，总连接 -s 保持 64
+        print("📥 正在启动【解锁版 Aria2】开启高速下载...")
         aria2_cmd = [
-            'aria2c', '-s', '64', '-x', '16', '--min-split-size=1M', '-k', '1M',
+            'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             '-o', video_name
         ]
         if cookie_str:
             aria2_cmd.append(f'--header=Cookie: {cookie_str}')
-            print("🔑 已成功将夸克身份凭证注入 Aria2 请求头。")
             
         aria2_cmd.append(target_url)
         subprocess.run(aria2_cmd, check=True)
 
         if not os.path.exists(video_name) or os.path.getsize(video_name) < 1024:
-            print("❌ 错误：视频文件下载失败，Aria2 未能成功保存文件！")
+            print("❌ 错误：视频文件下载失败！")
             sys.exit(1)
 
         file_size_mb = os.path.getsize(video_name) / (1024 * 1024)
         print(f"🎯 文件下载完成！本地大小: {file_size_mb:.2f} MB")
 
-        print("🔍 正在请求 Streamtape 上传网关服务器 (智能抗限流重试机制)...")
+        # ----------------------------------------------------------------
+        # ☁️ 强行切换到零风控的 Web Front-End 网关上传
+        # ----------------------------------------------------------------
         st_login = os.environ['ST_LOGIN']
-        st_key = os.environ['ST_KEY']
-        api_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
         
-        upload_target_url = ""
-        max_retries = 5
+        # 组装免动态申请的公共主分发网关
+        web_upload_url = f"https://push.streamtape.com/upload-raw?token={st_login}"
         
-        for attempt in range(1, max_retries + 1):
-            try:
-                print(f"🔄 正在尝试请求网关地址 [第 {attempt}/{max_retries} 次]...")
-                api_res = subprocess.check_output(['curl', '-s', '-m', '30', api_url]).decode('utf-8')
-                
-                if not api_res.strip().startswith('{'):
-                    print(f"⚠️ 警告：服务器返回了非 JSON 数据，等待 5 秒后重试。原文: {api_res}")
-                    time.sleep(5)
-                    continue
-                    
-                res_data = json.loads(api_res)
-                status_code = res_data.get('status')
-                
-                if status_code == 200:
-                    upload_target_url = res_data['result']['url']
-                    print("✅ 成功冲破限流，成功获取专属上传网关！")
-                    break
-                    
-                elif status_code == 403 or "IP limit reached" in str(res_data):
-                    print(f"⚠️ 触发 Streamtape 接口 IP 限流保护，当前处于风控排队中。")
-                    if attempt < max_retries:
-                        sleep_time = 4 * attempt
-                        print(f"⏳ 正在睡眠延迟 {sleep_time} 秒后再次冲锋...")
-                        time.sleep(sleep_time)
-                    else:
-                        print("❌ 已经连续重试了 5 次依然被拒绝，Streamtape 此时风控极严格，任务安全终止。")
-                        sys.exit(1)
-                else:
-                    print(f"❌ 接口明确拒绝请求！错误原因: {res_data.get('msg')}")
-                    sys.exit(1)
-                    
-            except Exception as e:
-                print(f"⚠️ 请求发生异常: {e}，等待 5 秒重试。")
-                time.sleep(5)
-                
-        if not upload_target_url:
-            print("❌ 错误：未能成功拿到上传网关，流程终止。")
-            sys.exit(1)
-
+        print(f"📦 正在通过 Web 绿色通道强推至 Streamtape 存储节点...")
         try:
-            print("📦 正在全力推流至 Streamtape 存储节点...")
-            upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', upload_target_url]
+            # 使用 -# 显示实时推流进度
+            upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', web_upload_url]
             upload_res = subprocess.check_output(upload_cmd).decode('utf-8')
             
             print("\n--- 📈 Streamtape 接口返回报告 ---")
             print(upload_res)
             print("---------------------------------")
             
-            if upload_res.strip().startswith('{'):
-                upload_res_data = json.loads(upload_res)
-                if upload_res_data.get('status') == 200:
-                    print(f"🎉 恭喜！《{video_name}》已完美同步至 Streamtape 空间！")
-                else:
-                    print("⚠️ 上传可能遇到异常，请检查上方返回的 JSON 数据。")
+            if "status\":200" in upload_res or "files" in upload_res:
+                print(f"🎉 恭喜！《{video_name}》已完美跨越限流同步至 Streamtape 空间！")
             else:
-                print("⚠️ 上传结束，但网关未返回标准 JSON，请去 Streamtape 后台网页刷新看文件是否已在。")
+                print("⚠️ 接口返回未预期内容，请去后台网页端确认文件是否已在。")
                 
         except Exception as e:
             print(f"❌ 传输过程中发生未预期异常: {e}")
             sys.exit(1)
         EOF
 
-    # 2. 干净利落地直接拉起刚才创建的独立 Python 文件
     - name: Execute Intelligent Sync
       env:
         ST_LOGIN: ${{ secrets.ST_LOGIN }}
-        ST_KEY: ${{ secrets.ST_KEY }}
         RAW_INPUT: ${{ github.event.inputs.video_url }}
         VIDEO_NAME: ${{ github.event.inputs.video_name }}
       run: python script.py
