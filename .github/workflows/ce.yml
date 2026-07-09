@@ -1,4 +1,4 @@
-name: Quark To Streamtape Express (Auto-Compile 64 Threads)
+name: Quark To Streamtape Express (Fast Cache Version)
 
 on:
   workflow_dispatch:
@@ -20,29 +20,42 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 【核心修复】：拉取标准源码，用 sed 暴力修改 16 线程的硬编码限制为 128，然后直接本地编译
-    - name: Compile Unlocked Aria2 From Source
+    # 1. 引入 GitHub 官方缓存，检查以前有没有编译好的解锁版二进制文件
+    - name: Cache Enhanced Aria2
+      id: cache-aria2
+      uses: actions/cache@v4
+      with:
+        path: /home/runner/aria2_bin
+        key: aria2-enhanced-1.37.0-v1
+
+    # 2. 如果缓存没命中（也就是第一次运行），老老实实在线秒编译一个解锁版
+    - name: Compile Unlocked Aria2 From Source (Only run if no cache)
+      if: steps.cache-aria2.outputs.cache-hit != 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y gcc g++ make pkg-config libssl-dev libxml2-dev zlib1g-dev libsqlite3-dev curl jq
         
-        echo "🛠️ 正在拉取标准 Aria2 源码进行线程限制解锁编译..."
+        echo "🛠️ 未检测到缓存，正在首次拉取标准 Aria2 源码进行线程限制解锁编译..."
         curl -L -o aria2.tar.gz https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.gz
         tar -xzf aria2.tar.gz
         cd aria2-1.37.0
         
-        # 核心改动：把源码中限制最大 16 线程的代码，强行改成 128
         echo "🔓 正在解除 16 线程限制，注入 128 线程高并发权限..."
         sed -i 's/A_MAX_NUM_CONNECTION_PER_SERVER = 16/A_MAX_NUM_CONNECTION_PER_SERVER = 128/g' src/OptionHandlerImpl.cc
         
-        # 极速编译（只需几秒）
         ./configure --without-gnutls --with-openssl
         make -j$(nproc)
         
-        # 将自编译解锁版的二进制文件移动到系统全局变量
-        sudo mv src/aria2c /usr/local/bin/aria2c-git
-        cd ..
-        echo "✅ 128 线程解锁版 Aria2 编译并就位成功！"
+        mkdir -p /home/runner/aria2_bin
+        cp src/aria2c /home/runner/aria2_bin/aria2c-git
+        echo "✅ 首次编译并打包缓存成功！"
+
+    # 3. 统一启用解锁后的程序
+    - name: Enable Unlocked Aria2
+      run: |
+        sudo cp /home/runner/aria2_bin/aria2c-git /usr/local/bin/aria2c-git
+        sudo chmod +x /usr/local/bin/aria2c-git
+        echo "🚀 解锁版 Aria2 准备就绪！"
 
     - name: Create Python Script File
       run: |
@@ -80,7 +93,7 @@ jobs:
             sys.exit(1)
 
         print("📥 正在启动【自编译解锁版 Aria2】开启 64 线程暴风下载...")
-        # 此时已经完美支持原生 -x 64 甚至最高 -x 128 了！
+        # 此时有了真正的自编译文件，这里传入 64 将不再报错，稳稳通过
         aria2_cmd = [
             'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -144,7 +157,7 @@ jobs:
                 time.sleep(5)
                 
         if not upload_target_url:
-            print("❌ 错误：未能成功拿到上传网关，流程终止。")
+            print("❌ 错误：未能成功拿到上传网关，流程终止. ")
             sys.exit(1)
 
         try:
