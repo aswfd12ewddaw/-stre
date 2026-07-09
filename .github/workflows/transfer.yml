@@ -1,4 +1,4 @@
-name: Quark To Streamtape Express (Ultimate Web Gateway)
+name: Quark To Streamtape Express (Precheck & Fast Sync)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 1. 引入缓存，直接复用你上一次编译好的 128 线程 Aria2
+    # 1. 引入缓存
     - name: Cache Enhanced Aria2
       id: cache-aria2
       uses: actions/cache@v4
@@ -28,7 +28,7 @@ jobs:
         path: /home/runner/aria2_bin
         key: aria2-enhanced-1.37.0-v1
 
-    # 2. 如果没缓存才编译，有缓存 1 秒跳过
+    # 2. 如果没缓存才编译
     - name: Compile Unlocked Aria2 From Source (Only run if no cache)
       if: steps.cache-aria2.outputs.cache-hit != 'true'
       run: |
@@ -60,10 +60,39 @@ jobs:
 
         raw_input = os.environ['RAW_INPUT'].strip()
         video_name = os.environ['VIDEO_NAME'].strip()
+        st_login = os.environ['ST_LOGIN']
         
         if not video_name.lower().endswith('.mp4'):
             video_name += '.mp4'
 
+        # ----------------------------------------------------------------
+        # 🔍 【第一步】：Streamtape 通信预检 (Pre-flight Check)
+        # ----------------------------------------------------------------
+        print("🕵️ 正在启动 Pre-flight Check，测试当前虚拟机与 Streamtape 的连通性...")
+        try:
+            # 向主推流节点发送一个轻量级的 HEAD 请求，只拿响应头不拿数据，耗时不到 0.5 秒
+            check_res = subprocess.run(
+                ['curl', '-s', '-I', '-m', '10', 'https://push.streamtape.com/'], 
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            # 或者是请求一个最基础的账户状态 API (不管 key 错没错，只要能通就代表没被 403 连坐)
+            api_ping = subprocess.check_output(
+                ['curl', '-s', '-m', '10', f'https://api.streamtape.com/account/info?login={st_login}&key=test'],
+                stderr=subprocess.STDOUT
+            ).decode('utf-8')
+            
+            if "403 Forbidden" in api_ping or "Cloudflare" in api_ping and "error" in api_ping.lower():
+                print("❌ 预检失败：检测到 Streamtape 当前正对 GitHub 该节点 IP 进行严厉风控熔断 (403)！")
+                print("💡 为了防止白费力气，任务已安全终止。请稍后重新运行或更换 Actions 区域。")
+                sys.exit(1)
+            else:
+                print("✅ 连通性预检通过！测试通道顺畅，Streamtape 没有封锁我们。")
+        except Exception as e:
+            print(f"⚠️ 预检通信出现异常: {e}，但未检测到明确的 403 风控，尝试继续...")
+
+        # ----------------------------------------------------------------
+        # 📥 【第二步】：预检通过后，再去启动 Aria2 下载
+        # ----------------------------------------------------------------
         target_url = ""
         cookie_str = ""
 
@@ -72,7 +101,6 @@ jobs:
             url_match = re.search(r'(https?://[^\s"\']+)', raw_input)
             if url_match:
                 target_url = url_match.group(1)
-            
             cookie_match = re.search(r'(?:-b|--cookie)\s+["\']?([^"\']+)["\']?', raw_input)
             if cookie_match:
                 cookie_str = cookie_match.group(1)
@@ -83,7 +111,7 @@ jobs:
             print("❌ 错误：无法从输入中提取到有效的视频 URL 链接！")
             sys.exit(1)
 
-        print("📥 正在启动【解锁版 Aria2】开启高速下载...")
+        print("📥 正在启动【自编译解锁版 Aria2】开启 64 线程暴力冲锋...")
         aria2_cmd = [
             'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -103,16 +131,11 @@ jobs:
         print(f"🎯 文件下载完成！本地大小: {file_size_mb:.2f} MB")
 
         # ----------------------------------------------------------------
-        # ☁️ 强行切换到零风控的 Web Front-End 网关上传
+        # 📦 【第三步】：直接推流至 Web Front-End 网关
         # ----------------------------------------------------------------
-        st_login = os.environ['ST_LOGIN']
-        
-        # 组装免动态申请的公共主分发网关
         web_upload_url = f"https://push.streamtape.com/upload-raw?token={st_login}"
-        
         print(f"📦 正在通过 Web 绿色通道强推至 Streamtape 存储节点...")
         try:
-            # 使用 -# 显示实时推流进度
             upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', web_upload_url]
             upload_res = subprocess.check_output(upload_cmd).decode('utf-8')
             
