@@ -1,3 +1,14 @@
+太好了，既然测试能够走通，那就说明您的环境完全没有问题，只要请求的逻辑正确，API 就会放行！
+
+现在我已经将**测试版中正确的 API 获取与推送逻辑**完美融入了您之前**附带 64 线程 Aria2 解锁下载版**的脚本中。整个逻辑得到了极大的优化：
+
+1. **更聪明的连通性预检**：现在的预检（Pre-flight Check）会带上真实的 `ST_KEY` 进行校验，如果填错账号密码会第一时间报错，不浪费您后面的时间。
+2. **动态获取真实上传节点**：废弃了不存在的 `push.streamtape.com` 假网关，改为每次上传时都从官方 API 动态获取为您临时分配的最优上传节点（例如 `https://node-xxx.streamtape.com`）。
+3. **保留了强力下载核心**：依旧保留原先修复的 Aria2 128 线程解锁和最高支持 64 线程的暴力下载命令。
+
+**请直接复制以下最新版本的全代码**覆盖掉您的工作流文件。确保您的 GitHub Secrets 里依旧配好了 `ST_LOGIN` 和 `ST_KEY`，就可以完美起飞了：
+
+```yaml
 name: Quark To Streamtape Express (Ultimate Fixed Cache)
 
 on:
@@ -65,10 +76,12 @@ jobs:
         import re
         import subprocess
         import json
+        import urllib.request
 
         raw_input = os.environ['RAW_INPUT'].strip()
         video_name = os.environ['VIDEO_NAME'].strip()
         st_login = os.environ['ST_LOGIN']
+        st_key = os.environ['ST_KEY']
         
         if not video_name.lower().endswith('.mp4'):
             video_name += '.mp4'
@@ -78,8 +91,9 @@ jobs:
         # ----------------------------------------------------------------
         print("🕵️ 正在启动 Pre-flight Check，测试当前虚拟机与 Streamtape 的连通性...")
         try:
+            # 引入了正确的 API Key 验证，模拟正常的浏览器请求头
             api_ping = subprocess.check_output(
-                ['curl', '-s', '-m', '10', f'https://api.streamtape.com/account/info?login={st_login}&key=test'],
+                ['curl', '-s', '-m', '10', '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', f'https://api.streamtape.com/account/info?login={st_login}&key={st_key}'],
                 stderr=subprocess.STDOUT
             ).decode('utf-8')
             
@@ -87,10 +101,14 @@ jobs:
                 print("❌ 预检失败：检测到 Streamtape 当前正对 GitHub 该节点 IP 进行严厉风控熔断 (403)！")
                 print("💡 为了防止白费力气，任务已安全终止。请稍后重新运行或更换 Actions 区域。")
                 sys.exit(1)
+            elif "\"status\":200" in api_ping.replace(" ", ""):
+                print("✅ 连通性预检通过！测试通道顺畅，账号密钥验证成功。")
             else:
-                print("✅ 连通性预检通过！测试通道顺畅，Streamtape 没有封锁我们。")
+                print("⚠️ 预检返回状态异常（请检查 ST_LOGIN 和 ST_KEY 是否正确）：")
+                print(api_ping)
+                sys.exit(1)
         except Exception as e:
-            print(f"⚠️ 预检通信出现异常: {e}，但未检测到明确的 403 风控，尝试继续...")
+            print(f"⚠️ 预检通信出现异常: {e}，尝试继续...")
 
         # ----------------------------------------------------------------
         # 📥 【第二步】：预检通过后，再去启动 Aria2 下载
@@ -133,19 +151,33 @@ jobs:
         print(f"🎯 文件下载完成！本地大小: {file_size_mb:.2f} MB")
 
         # ----------------------------------------------------------------
-        # 📦 【第三步】：直接推流至 Web Front-End 网关
+        # 📦 【第三步】：获取真实上传节点并推流
         # ----------------------------------------------------------------
-        web_upload_url = f"https://push.streamtape.com/upload-raw?token={st_login}"
-        print(f"📦 正在通过 Web 绿色通道强推至 Streamtape 存储节点...")
+        print(f"📦 正在向 Streamtape 官方 API 请求分配专属上传节点...")
+        api_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
+        
         try:
-            upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', web_upload_url]
-            upload_res = subprocess.check_output(upload_cmd).decode('utf-8')
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req) as response:
+                api_res = json.loads(response.read().decode('utf-8'))
+                
+            if api_res.get('status') != 200 or 'result' not in api_res or 'url' not in api_res['result']:
+                print("❌ 错误：无法获取上传节点 URL。API 返回：")
+                print(api_res)
+                sys.exit(1)
+                
+            upload_url = api_res['result']['url']
+            print(f"✅ 成功获取专属节点: {upload_url}")
+            
+            print(f"🚀 正在全速推送 《{video_name}》 至该节点...")
+            upload_cmd = ['curl', '-#', '-F', f'file=@{video_name}', upload_url]
+            upload_res_raw = subprocess.check_output(upload_cmd).decode('utf-8')
             
             print("\n--- 📈 Streamtape 接口返回报告 ---")
-            print(upload_res)
+            print(upload_res_raw)
             print("---------------------------------")
             
-            if "status\":200" in upload_res or "files" in upload_res:
+            if "status\":200" in upload_res_raw.replace(" ", "") or "files" in upload_res_raw:
                 print(f"🎉 恭喜！《{video_name}》已完美跨越限流同步至 Streamtape 空间！")
             else:
                 print("⚠️ 接口返回未预期内容，请去后台网页端确认文件是否已在。")
@@ -158,6 +190,8 @@ jobs:
     - name: Execute Intelligent Sync
       env:
         ST_LOGIN: ${{ secrets.ST_LOGIN }}
+        ST_KEY: ${{ secrets.ST_KEY }} # 已经把 ST_KEY 正式加入环境变量
         RAW_INPUT: ${{ github.event.inputs.video_url }}
         VIDEO_NAME: ${{ github.event.inputs.video_name }}
       run: python script.py
+```
