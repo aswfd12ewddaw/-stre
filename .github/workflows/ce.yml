@@ -38,6 +38,7 @@ jobs:
         import subprocess
         import json
         import urllib.request
+        import shlex
 
         raw_input = os.environ['RAW_INPUT'].strip()
         video_name = os.environ['VIDEO_NAME'].strip()
@@ -70,32 +71,41 @@ jobs:
             print(f"⚠️ 预检通信出现异常: {e}，尝试继续...")
 
         # ----------------------------------------------------------------
-        # 📥 【第二步】：智能解析 cURL 参数并启动 Aria2
+        # 📥 【第二步】：原生态智能解析 cURL 参数并启动 Aria2
         # ----------------------------------------------------------------
         target_url = ""
         aria2_headers = []
 
         if raw_input.startswith("curl"):
-            print("🚀 检测到您输入的是整段 cURL 命令，正在智能提取并完美复刻浏览器参数...")
-            # 1. 提取 URL
-            url_match = re.search(r"(https?://[^\s'\"]+)", raw_input)
-            if url_match:
-                target_url = url_match.group(1)
-            
-            # 2. 提取所有 Header，剔除会导致 400 Bad Request 的冲突头部
-            headers = re.findall(r"(?:-H|--header)\s+['\"](.*?)['\"]", raw_input)
-            for h in headers:
-                h_lower = h.lower()
-                # 剔除 HTTP/2 伪头部 (authority 等)、压缩编码和 Range 冲突
-                if h_lower.startswith("range:") or h_lower.startswith("authority:") or h_lower.startswith(":") or h_lower.startswith("accept-encoding:"):
-                    continue
-                aria2_headers.append(h)
-            
-            # 3. 提取 Cookie (独立参数)
-            cookie_match = re.search(r"(?:-b|--cookie)\s+['\"](.*?)['\"]", raw_input)
-            if cookie_match:
-                aria2_headers.append(f"Cookie: {cookie_match.group(1)}")
+            print("🚀 检测到您输入的是整段 cURL 命令，正在使用原生 shlex 智能拆解并完美复刻浏览器参数...")
+            # 去除一些可能导致解析失败的多余续行符 \
+            cleaned_input = raw_input.replace('\\\n', ' ').replace('\\\r\n', ' ')
+            try:
+                args = shlex.split(cleaned_input)
+                for i in range(len(args)):
+                    if args[i] == '-H' or args[i] == '--header':
+                        if i + 1 < len(args):
+                            h = args[i+1]
+                            h_lower = h.lower()
+                            # 剔除 HTTP/2 伪头部 (authority 等)、压缩编码和 Range 冲突
+                            if h_lower.startswith("range:") or h_lower.startswith("authority:") or h_lower.startswith(":") or h_lower.startswith("accept-encoding:"):
+                                continue
+                            aria2_headers.append(h)
+                    elif args[i] == '-b' or args[i] == '--cookie':
+                        if i + 1 < len(args):
+                            aria2_headers.append(f"Cookie: {args[i+1]}")
+                    elif args[i] == '-A' or args[i] == '--user-agent':
+                        if i + 1 < len(args):
+                            aria2_headers.append(f"User-Agent: {args[i+1]}")
+                    elif args[i].startswith('http://') or args[i].startswith('https://'):
+                        target_url = args[i]
+            except Exception as e:
+                print(f"⚠️ 解析 cURL 时发生异常：{e}。尝试使用正则降级解析...")
+                url_match = re.search(r"(https?://[^\s'\"]+)", raw_input)
+                if url_match:
+                    target_url = url_match.group(1)
         else:
+            print("🚀 检测到您输入的是纯直链 URL...")
             target_url = raw_input
 
         if not target_url:
@@ -108,9 +118,16 @@ jobs:
             '-o', video_name
         ]
         
+        # 补全 User-Agent
         has_ua = any(h.lower().startswith("user-agent:") for h in aria2_headers)
         if not has_ua:
             aria2_cmd.extend(['--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'])
+        
+        # 自动补全阿里云盘 Referer（专门防 400 Bad Request 错误的核心机制）
+        has_referer = any(h.lower().startswith("referer:") for h in aria2_headers)
+        if not has_referer and "aliyundrive" in target_url:
+            print("💡 智能补全：检测到阿里云盘链接但缺失 Referer，已自动补全标准 Referer 头以防 400 拦截。")
+            aria2_headers.append("Referer: https://www.aliyundrive.com/")
             
         for h in aria2_headers:
             aria2_cmd.append(f"--header={h}")
