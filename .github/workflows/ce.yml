@@ -119,6 +119,7 @@ jobs:
                 
             target_url = ""
             aria2_headers = []
+            user_provided_name = ""
             
             # --- 智能解析命令 ---
             if task_input.startswith("curl"):
@@ -139,6 +140,9 @@ jobs:
                         elif args[i] == '-A' or args[i] == '--user-agent':
                             if i + 1 < len(args):
                                 aria2_headers.append(f"User-Agent: {args[i+1]}")
+                        elif args[i] == '-o' or args[i] == '--output':
+                            if i + 1 < len(args):
+                                user_provided_name = args[i+1]
                         elif args[i].startswith('http://') or args[i].startswith('https://'):
                             target_url = args[i]
                 except Exception as e:
@@ -155,21 +159,23 @@ jobs:
                 continue
                 
             # --- 智能提取完美中文名 ---
-            true_name = ""
-            parsed_url = urllib.parse.urlparse(target_url)
-            qs = urllib.parse.parse_qs(parsed_url.query)
-            for k, v in qs.items():
-                if k.lower() == 'response-content-disposition':
-                    cd = v[0]
-                    m1 = re.search(r"filename\*=UTF-8''([^;&]+)", cd, re.IGNORECASE)
-                    if m1:
-                        true_name = urllib.parse.unquote(m1.group(1))
-                        break
-                    m2 = re.search(r'filename="([^"]+)"', cd, re.IGNORECASE)
-                    if m2:
-                        true_name = urllib.parse.unquote(m2.group(1))
-                        break
-                        
+            true_name = user_provided_name
+            
+            if not true_name:
+                parsed_url = urllib.parse.urlparse(target_url)
+                qs = urllib.parse.parse_qs(parsed_url.query)
+                for k, v in qs.items():
+                    if k.lower() == 'response-content-disposition':
+                        cd = v[0]
+                        m1 = re.search(r"filename\*=UTF-8''([^;&]+)", cd, re.IGNORECASE)
+                        if m1:
+                            true_name = urllib.parse.unquote(m1.group(1))
+                            break
+                        m2 = re.search(r'filename="([^"]+)"', cd, re.IGNORECASE)
+                        if m2:
+                            true_name = urllib.parse.unquote(m2.group(1))
+                            break
+                            
             if not true_name:
                 basename = urllib.parse.unquote(os.path.basename(parsed_url.path))
                 if basename and '.' in basename:
@@ -182,7 +188,7 @@ jobs:
             if not any(true_name.lower().endswith(ext) for ext in valid_exts):
                 true_name += '.mp4'
                 
-            print(f"✨ 成功捕捉中文文件名: 【{true_name}】")
+            print(f"✨ 成功锁定中文文件名: 【{true_name}】")
 
             # --- 启动引擎下载 ---
             print("📥 正在启动【Aria2-Pro 静态解锁版】全速冲锋...")
@@ -260,7 +266,7 @@ jobs:
                 upload_res_raw = subprocess.check_output(upload_cmd).decode('utf-8')
                 
                 if "status\":200" in upload_res_raw.replace(" ", "") or "files" in upload_res_raw:
-                    print(f"🎉 任务 {idx} 完美收官！已安全躺在 Streamtape 里！")
+                    print(f"🎉 任务 {idx} 《{true_name}》 推送成功！")
                     
                     # 数据库级中文名防御
                     try:
@@ -269,13 +275,13 @@ jobs:
                             file_id = up_json['result']['id']
                             st_name = up_json['result'].get('name', '')
                             if st_name != true_name:
-                                print(f"⚔️ 触发 API 防御：强行将服务器丢字的名称重写回《{true_name}》...")
+                                print(f"⚔️ 触发 API 防御：强行将服务器丢失的中文字符重写回来...")
                                 rename_url = f"https://api.streamtape.com/file/rename?login={st_login}&key={st_key}&file={file_id}&name={urllib.parse.quote(true_name)}"
                                 rename_req = urllib.request.Request(rename_url, headers={'User-Agent': 'Mozilla/5.0'})
                                 with urllib.request.urlopen(rename_req) as rename_res:
                                     pass
                     except Exception as e:
-                        pass
+                        print(f"⚠️ 中文名覆写失败: {e}")
                     
                     success_count += 1
                 else:
