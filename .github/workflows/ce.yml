@@ -1,11 +1,15 @@
-name: Quark To Streamtape Express (Ultimate Lightning Fast)
+name: Quark To Streamtape Express (Ultimate Batch Edition)
 
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: '请输入网盘直链 (如用 cURL 请务必删掉所有回车变成单行)'
+      video_urls:
+        description: '【必填】下载链接 (支持粘贴多个直链或多个 cURL，用空格分隔即可)'
         required: true
+        default: ''
+      folder_name:
+        description: '【可选】在网盘新建的文件夹名称 (留空则传到根目录)'
+        required: false
         default: ''
 
 jobs:
@@ -37,7 +41,8 @@ jobs:
         import urllib.parse
         import shlex
 
-        raw_input = os.environ['RAW_INPUT'].strip()
+        raw_input = os.environ.get('RAW_INPUT', '').strip()
+        folder_name = os.environ.get('FOLDER_NAME', '').strip()
         st_login = os.environ['ST_LOGIN']
         st_key = os.environ['ST_KEY']
         
@@ -55,193 +60,239 @@ jobs:
                 print("❌ 预检失败：检测到 Streamtape 当前正对 GitHub 该节点 IP 进行严厉风控熔断 (403)！")
                 sys.exit(1)
             elif "\"status\":200" in api_ping.replace(" ", ""):
-                print("✅ 连通性预检通过！测试通道顺畅，账号密钥验证成功。")
+                print("✅ 连通性预检通过！")
             else:
-                print("⚠️ 预检返回状态异常（请检查 ST_LOGIN 和 ST_KEY 是否正确）：")
-                print(api_ping)
-                sys.exit(1)
+                print("⚠️ 预检返回异常，尝试继续...")
         except Exception as e:
             print(f"⚠️ 预检通信出现异常: {e}，尝试继续...")
 
-        # ----------------------------------------------------------------
-        # 📥 【第二步】：原生态智能解析 cURL 参数并启动 Aria2
-        # ----------------------------------------------------------------
-        target_url = ""
-        aria2_headers = []
-
-        if raw_input.startswith("curl"):
-            print("🚀 检测到您输入的是整段 cURL 命令，正在使用原生 shlex 智能拆解并完美复刻浏览器参数...")
-            cleaned_input = raw_input.replace('\\\n', ' ').replace('\\\r\n', ' ')
+        # ==========================================
+        # 📂 处理文件夹逻辑
+        # ==========================================
+        target_folder_id = ""
+        if folder_name:
+            print(f"\n📁 检测到您要求创建文件夹: 【{folder_name}】")
+            create_url = f"https://api.streamtape.com/file/createfolder?login={st_login}&key={st_key}&name={urllib.parse.quote(folder_name)}"
             try:
-                args = shlex.split(cleaned_input)
-                for i in range(len(args)):
-                    if args[i] == '-H' or args[i] == '--header':
-                        if i + 1 < len(args):
-                            h = args[i+1]
-                            h_lower = h.lower()
-                            if h_lower.startswith("range:") or h_lower.startswith("authority:") or h_lower.startswith(":") or h_lower.startswith("accept-encoding:"):
-                                continue
-                            aria2_headers.append(h)
-                    elif args[i] == '-b' or args[i] == '--cookie':
-                        if i + 1 < len(args):
-                            aria2_headers.append(f"Cookie: {args[i+1]}")
-                    elif args[i] == '-A' or args[i] == '--user-agent':
-                        if i + 1 < len(args):
-                            aria2_headers.append(f"User-Agent: {args[i+1]}")
-                    elif args[i].startswith('http://') or args[i].startswith('https://'):
-                        target_url = args[i]
+                req = urllib.request.Request(create_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req) as response:
+                    res_json = json.loads(response.read().decode('utf-8'))
+                    if res_json.get('status') == 200 and 'result' in res_json and 'folderid' in res_json['result']:
+                        target_folder_id = res_json['result']['folderid']
+                        print(f"✅ 文件夹在云端创建成功！专属归档 ID: {target_folder_id}")
+                    else:
+                        print("⚠️ 创建文件夹失败，将退回至根目录上传。返回：", res_json)
             except Exception as e:
-                print(f"⚠️ 解析 cURL 时发生异常：{e}。尝试使用正则降级解析...")
-                url_match = re.search(r"(https?://[^\s'\"]+)", raw_input)
-                if url_match:
-                    target_url = url_match.group(1)
+                print(f"⚠️ 创建文件夹异常: {e}，退回根目录。")
+
+        # ==========================================
+        # 📥 解析多任务列表
+        # ==========================================
+        tasks = []
+        if "curl " in raw_input.lower():
+            # 按 curl 切割多条命令行
+            parts = re.split(r'\bcurl\b', raw_input, flags=re.IGNORECASE)
+            for p in parts:
+                if p.strip():
+                    tasks.append("curl " + p.strip())
         else:
-            print("🚀 检测到您输入的是纯直链 URL...")
-            target_url = raw_input
-
-        if not target_url:
-            print("❌ 错误：无法从输入中提取到有效的视频 URL 链接！")
-            sys.exit(1)
-
-        # ----------------------------------------------------------------
-        # 🛡️ 【绝杀技】：智能提取真正的中文文件名，对抗一切掉字乱码
-        # ----------------------------------------------------------------
-        true_name = ""
-        parsed_url = urllib.parse.urlparse(target_url)
-        qs = urllib.parse.parse_qs(parsed_url.query)
-        for k, v in qs.items():
-            if k.lower() == 'response-content-disposition':
-                cd = v[0]
-                m1 = re.search(r"filename\*=UTF-8''([^;&]+)", cd, re.IGNORECASE)
-                if m1:
-                    true_name = urllib.parse.unquote(m1.group(1))
-                    break
-                m2 = re.search(r'filename="([^"]+)"', cd, re.IGNORECASE)
-                if m2:
-                    true_name = urllib.parse.unquote(m2.group(1))
-                    break
-                    
-        if not true_name:
-            basename = urllib.parse.unquote(os.path.basename(parsed_url.path))
-            if basename and '.' in basename:
-                true_name = basename
-
-        if not true_name:
-            true_name = "Downloaded_Video"
+            # 纯直链抓取，支持空格、逗号或换行分隔
+            tasks = re.findall(r'(https?://[^\s,;|"\'<>]+)', raw_input)
             
-        valid_exts = ('.mp4', '.mkv', '.avi', '.ts', '.mov', '.flv')
-        if not any(true_name.lower().endswith(ext) for ext in valid_exts):
-            true_name += '.mp4'
-            
-        print(f"✨ 独家黑科技：已从深层链接中完美提取真实的中文名: 【{true_name}】")
-
-        print("📥 正在启动【Aria2-Pro 静态解锁版】开启 64 线程暴力冲锋...")
-        aria2_cmd = [
-            'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
-            '-d', download_dir, '--content-disposition-default-utf8=true'
-        ]
-        
-        has_ua = any(h.lower().startswith("user-agent:") for h in aria2_headers)
-        if not has_ua:
-            aria2_cmd.extend(['--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'])
-        
-        has_referer = any(h.lower().startswith("referer:") for h in aria2_headers)
-        if not has_referer:
-            if "aliyundrive.cloud" in target_url or "alipan.com" in target_url:
-                print("💡 智能补全：检测到阿里云盘 Open API 链接，自动补全专属 Referer (https://openapi.alipan.com/) 以防拦截。")
-                aria2_headers.append("Referer: https://openapi.alipan.com/")
-            elif "aliyundrive" in target_url:
-                print("💡 智能补全：检测到普通阿里云盘链接，自动补全标准 Referer 以防拦截。")
-                aria2_headers.append("Referer: https://www.aliyundrive.com/")
-            
-        for h in aria2_headers:
-            aria2_cmd.append(f"--header={h}")
-            
-        aria2_cmd.append(target_url)
-        subprocess.run(aria2_cmd, check=True)
-
-        downloaded_files = [f for f in os.listdir(download_dir) if not f.endswith('.aria2')]
-        if not downloaded_files:
-            print("❌ 错误：下载舱为空，视频文件下载失败或被拦截！")
+        if not tasks:
+            print("❌ 错误：无法提取到任何有效的下载链接或 cURL！")
             sys.exit(1)
             
-        original_name = downloaded_files[0]
-        file_path = os.path.join(download_dir, original_name)
+        print(f"\n🚀 智能队列生成完毕！共探测到 {len(tasks)} 个下载任务，开始排队执行...")
 
-        if os.path.getsize(file_path) < 5 * 1024 * 1024:
-            file_size = os.path.getsize(file_path)
-            print(f"❌ 错误：视频文件下载异常！（文件大小仅为 {file_size} 字节，肯定是触发了网盘防盗链，返回了报错信息）")
-            if os.path.exists(file_path):
-                with open(file_path, 'r', errors='ignore') as f:
-                    print("\n--- 🔍 致命：网盘拦截原始报错内容 ---")
-                    print(f.read()[:2000])
-                    print("--------------------------------------\n")
-            sys.exit(1)
-            
-        # 强制用我们提取到的完美中文名覆盖 Aria2 乱搞的名字
-        final_path = os.path.join(download_dir, true_name)
-        if file_path != final_path:
-            os.rename(file_path, final_path)
-            file_path = final_path
+        success_count = 0
+        fail_count = 0
 
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        print(f"🎯 文件下载完成！【自动强力修复文件名为: {true_name}】，本地大小: {file_size_mb:.2f} MB")
-
-        # ----------------------------------------------------------------
-        # 📦 【第三步】：获取真实上传节点并推流
-        # ----------------------------------------------------------------
-        print(f"📦 正在向 Streamtape 官方 API 请求分配专属上传节点...")
-        api_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
-        
-        try:
-            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-            with urllib.request.urlopen(req) as response:
-                api_res = json.loads(response.read().decode('utf-8'))
-                
-            if api_res.get('status') != 200 or 'result' not in api_res or 'url' not in api_res['result']:
-                print("❌ 错误：无法获取上传节点 URL。API 返回：")
-                print(api_res)
-                sys.exit(1)
-                
-            upload_url = api_res['result']['url']
-            print(f"✅ 成功获取专属节点: {upload_url}")
+        for idx, task_input in enumerate(tasks, 1):
+            print(f"\n" + "="*60)
+            print(f"🎬 正在执行第 {idx} / {len(tasks)} 个任务")
+            print("="*60)
             
-            print(f"🚀 正在全速推送该视频 至该节点...")
-            upload_cmd = ['curl', '-#', '-F', f'file=@{file_path}', upload_url]
-            upload_res_raw = subprocess.check_output(upload_cmd).decode('utf-8')
-            
-            print("\n--- 📈 Streamtape 接口返回报告 ---")
-            print(upload_res_raw)
-            print("---------------------------------")
-            
-            if "status\":200" in upload_res_raw.replace(" ", "") or "files" in upload_res_raw:
-                print(f"🎉 恭喜！文件已成功推送到 Streamtape！")
+            # 每次任务前清理工作台，防止冲突
+            for f in os.listdir(download_dir):
+                os.remove(os.path.join(download_dir, f))
                 
-                # --- 终极绝杀：检测服务器是否吃了中文，如果吃了就强行写回去 ---
+            target_url = ""
+            aria2_headers = []
+            
+            # --- 智能解析命令 ---
+            if task_input.startswith("curl"):
+                cleaned_input = task_input.replace('\\\n', ' ').replace('\\\r\n', ' ')
                 try:
-                    up_json = json.loads(upload_res_raw)
-                    if up_json.get('status') == 200 and 'result' in up_json and 'id' in up_json['result']:
-                        file_id = up_json['result']['id']
-                        st_name = up_json['result'].get('name', '')
-                        if st_name != true_name:
-                            print(f"🔄 警报：检测到 Streamtape 服务器偷偷把中文名吃掉了 (变成了 {st_name})！")
-                            print("⚔️ 正在使用黑客级 API 直接攻击数据库强制覆写中文名...")
-                            rename_url = f"https://api.streamtape.com/file/rename?login={st_login}&key={st_key}&file={file_id}&name={urllib.parse.quote(true_name)}"
-                            rename_req = urllib.request.Request(rename_url, headers={'User-Agent': 'Mozilla/5.0'})
-                            with urllib.request.urlopen(rename_req) as rename_res:
-                                rename_json = json.loads(rename_res.read().decode('utf-8'))
-                                if rename_json.get('status') == 200:
-                                    print(f"✅ 【大获全胜】中文名强制修复成功！这下彻底是 《{true_name}》 了！")
-                                else:
-                                    print("⚠️ 尝试修复中文名失败（不影响播放）")
+                    args = shlex.split(cleaned_input)
+                    for i in range(len(args)):
+                        if args[i] == '-H' or args[i] == '--header':
+                            if i + 1 < len(args):
+                                h = args[i+1]
+                                h_lower = h.lower()
+                                if h_lower.startswith("range:") or h_lower.startswith("authority:") or h_lower.startswith(":") or h_lower.startswith("accept-encoding:"):
+                                    continue
+                                aria2_headers.append(h)
+                        elif args[i] == '-b' or args[i] == '--cookie':
+                            if i + 1 < len(args):
+                                aria2_headers.append(f"Cookie: {args[i+1]}")
+                        elif args[i] == '-A' or args[i] == '--user-agent':
+                            if i + 1 < len(args):
+                                aria2_headers.append(f"User-Agent: {args[i+1]}")
+                        elif args[i].startswith('http://') or args[i].startswith('https://'):
+                            target_url = args[i]
                 except Exception as e:
-                    print(f"⚠️ 强制覆写中文名时遇到小插曲: {e}")
-
+                    print(f"⚠️ 解析任务 cURL 时遇到问题：{e}。降级处理...")
+                    url_match = re.search(r"(https?://[^\s'\"]+)", task_input)
+                    if url_match:
+                        target_url = url_match.group(1)
             else:
-                print("⚠️ 接口返回未预期内容，请去后台网页端确认文件是否已在。")
+                target_url = task_input
                 
-        except Exception as e:
-            print(f"❌ 传输过程中发生未预期异常: {e}")
+            if not target_url:
+                print(f"⏭️ 该任务未能提取到有效 URL，已跳过。")
+                fail_count += 1
+                continue
+                
+            # --- 智能提取完美中文名 ---
+            true_name = ""
+            parsed_url = urllib.parse.urlparse(target_url)
+            qs = urllib.parse.parse_qs(parsed_url.query)
+            for k, v in qs.items():
+                if k.lower() == 'response-content-disposition':
+                    cd = v[0]
+                    m1 = re.search(r"filename\*=UTF-8''([^;&]+)", cd, re.IGNORECASE)
+                    if m1:
+                        true_name = urllib.parse.unquote(m1.group(1))
+                        break
+                    m2 = re.search(r'filename="([^"]+)"', cd, re.IGNORECASE)
+                    if m2:
+                        true_name = urllib.parse.unquote(m2.group(1))
+                        break
+                        
+            if not true_name:
+                basename = urllib.parse.unquote(os.path.basename(parsed_url.path))
+                if basename and '.' in basename:
+                    true_name = basename
+
+            if not true_name:
+                true_name = f"Downloaded_Video_Task_{idx}"
+                
+            valid_exts = ('.mp4', '.mkv', '.avi', '.ts', '.mov', '.flv')
+            if not any(true_name.lower().endswith(ext) for ext in valid_exts):
+                true_name += '.mp4'
+                
+            print(f"✨ 成功捕捉中文文件名: 【{true_name}】")
+
+            # --- 启动引擎下载 ---
+            print("📥 正在启动【Aria2-Pro 静态解锁版】全速冲锋...")
+            aria2_cmd = [
+                'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
+                '-d', download_dir, '--content-disposition-default-utf8=true'
+            ]
+            
+            has_ua = any(h.lower().startswith("user-agent:") for h in aria2_headers)
+            if not has_ua:
+                aria2_cmd.extend(['--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'])
+            
+            has_referer = any(h.lower().startswith("referer:") for h in aria2_headers)
+            if not has_referer:
+                if "aliyundrive.cloud" in target_url or "alipan.com" in target_url:
+                    aria2_headers.append("Referer: https://openapi.alipan.com/")
+                elif "aliyundrive" in target_url:
+                    aria2_headers.append("Referer: https://www.aliyundrive.com/")
+                
+            for h in aria2_headers:
+                aria2_cmd.append(f"--header={h}")
+                
+            aria2_cmd.append(target_url)
+            
+            try:
+                subprocess.run(aria2_cmd, check=True)
+            except Exception as e:
+                print(f"❌ 下载崩溃或被封杀: {e}")
+                fail_count += 1
+                continue
+
+            downloaded_files = [f for f in os.listdir(download_dir) if not f.endswith('.aria2')]
+            if not downloaded_files:
+                print(f"❌ 任务失败（下载夹为空，可能是该资源失效）！")
+                fail_count += 1
+                continue
+                
+            original_name = downloaded_files[0]
+            file_path = os.path.join(download_dir, original_name)
+
+            if os.path.getsize(file_path) < 5 * 1024 * 1024:
+                file_size = os.path.getsize(file_path)
+                print(f"❌ 触发防盗链！（文件过小：{file_size} 字节）")
+                fail_count += 1
+                continue
+                
+            # 强制覆盖中文名
+            final_path = os.path.join(download_dir, true_name)
+            if file_path != final_path:
+                os.rename(file_path, final_path)
+                file_path = final_path
+
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            print(f"🎯 极速下载完成！本地大小: {file_size_mb:.2f} MB")
+
+            # --- 自动归档与推送 ---
+            api_ul_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
+            if target_folder_id:
+                api_ul_url += f"&folder={target_folder_id}"
+                
+            try:
+                req = urllib.request.Request(api_ul_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req) as response:
+                    api_res = json.loads(response.read().decode('utf-8'))
+                    
+                if api_res.get('status') != 200 or 'result' not in api_res or 'url' not in api_res['result']:
+                    print(f"❌ 无法获取上传节点 URL。")
+                    fail_count += 1
+                    continue
+                    
+                upload_url = api_res['result']['url']
+                print(f"🚀 正在上传至云端节点...")
+                
+                upload_cmd = ['curl', '-#', '-F', f'file=@{file_path}', upload_url]
+                upload_res_raw = subprocess.check_output(upload_cmd).decode('utf-8')
+                
+                if "status\":200" in upload_res_raw.replace(" ", "") or "files" in upload_res_raw:
+                    print(f"🎉 任务 {idx} 完美收官！已安全躺在 Streamtape 里！")
+                    
+                    # 数据库级中文名防御
+                    try:
+                        up_json = json.loads(upload_res_raw)
+                        if up_json.get('status') == 200 and 'result' in up_json and 'id' in up_json['result']:
+                            file_id = up_json['result']['id']
+                            st_name = up_json['result'].get('name', '')
+                            if st_name != true_name:
+                                print(f"⚔️ 触发 API 防御：强行将服务器丢字的名称重写回《{true_name}》...")
+                                rename_url = f"https://api.streamtape.com/file/rename?login={st_login}&key={st_key}&file={file_id}&name={urllib.parse.quote(true_name)}"
+                                rename_req = urllib.request.Request(rename_url, headers={'User-Agent': 'Mozilla/5.0'})
+                                with urllib.request.urlopen(rename_req) as rename_res:
+                                    pass
+                    except Exception as e:
+                        pass
+                    
+                    success_count += 1
+                else:
+                    print(f"⚠️ 任务 {idx} 上传结果疑似异常，请去网页核对。")
+                    fail_count += 1
+                    
+            except Exception as e:
+                print(f"❌ 任务 {idx} 推送时断开: {e}")
+                fail_count += 1
+                
+        print("\n" + "*"*60)
+        print(f"🏆 全部任务执行完毕！")
+        print(f"✅ 成功搬运: {success_count} 个文件")
+        print(f"❌ 失败跳过: {fail_count} 个文件")
+        print("*"*60)
+        
+        if fail_count > 0 and success_count == 0:
             sys.exit(1)
         EOF
 
@@ -249,5 +300,6 @@ jobs:
       env:
         ST_LOGIN: ${{ secrets.ST_LOGIN }}
         ST_KEY: ${{ secrets.ST_KEY }}
-        RAW_INPUT: ${{ github.event.inputs.video_url }}
+        RAW_INPUT: ${{ github.event.inputs.video_urls }}
+        FOLDER_NAME: ${{ github.event.inputs.folder_name }}
       run: python script.py
