@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: '请输入直链或整段 cURL 下载命令 (右键复制为 cURL)'
+        description: '请输入网盘直链 (如用 cURL 请务必删掉回车变成单行)'
         required: true
         default: ''
       video_name:
@@ -78,7 +78,6 @@ jobs:
 
         if raw_input.startswith("curl"):
             print("🚀 检测到您输入的是整段 cURL 命令，正在使用原生 shlex 智能拆解并完美复刻浏览器参数...")
-            # 去除一些可能导致解析失败的多余续行符 \
             cleaned_input = raw_input.replace('\\\n', ' ').replace('\\\r\n', ' ')
             try:
                 args = shlex.split(cleaned_input)
@@ -87,7 +86,6 @@ jobs:
                         if i + 1 < len(args):
                             h = args[i+1]
                             h_lower = h.lower()
-                            # 剔除 HTTP/2 伪头部 (authority 等)、压缩编码和 Range 冲突
                             if h_lower.startswith("range:") or h_lower.startswith("authority:") or h_lower.startswith(":") or h_lower.startswith("accept-encoding:"):
                                 continue
                             aria2_headers.append(h)
@@ -118,16 +116,19 @@ jobs:
             '-o', video_name
         ]
         
-        # 补全 User-Agent
         has_ua = any(h.lower().startswith("user-agent:") for h in aria2_headers)
         if not has_ua:
             aria2_cmd.extend(['--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'])
         
-        # 自动补全阿里云盘 Referer（专门防 400 Bad Request 错误的核心机制）
+        # 自动补全阿里云盘 Referer（专门防 400 / SignatureDoesNotMatch 拦截）
         has_referer = any(h.lower().startswith("referer:") for h in aria2_headers)
-        if not has_referer and "aliyundrive" in target_url:
-            print("💡 智能补全：检测到阿里云盘链接但缺失 Referer，已自动补全标准 Referer 头以防 400 拦截。")
-            aria2_headers.append("Referer: https://www.aliyundrive.com/")
+        if not has_referer:
+            if "aliyundrive.cloud" in target_url or "alipan.com" in target_url:
+                print("💡 智能补全：检测到阿里云盘 Open API 链接，自动补全专属 Referer (https://openapi.alipan.com/) 以防拦截。")
+                aria2_headers.append("Referer: https://openapi.alipan.com/")
+            elif "aliyundrive" in target_url:
+                print("💡 智能补全：检测到普通阿里云盘链接，自动补全标准 Referer 以防拦截。")
+                aria2_headers.append("Referer: https://www.aliyundrive.com/")
             
         for h in aria2_headers:
             aria2_cmd.append(f"--header={h}")
@@ -136,7 +137,12 @@ jobs:
         subprocess.run(aria2_cmd, check=True)
 
         if not os.path.exists(video_name) or os.path.getsize(video_name) < 1024:
-            print("❌ 错误：视频文件下载失败！")
+            print("❌ 错误：视频文件下载失败！（文件小于 1KB，可能是被网盘拦截返回了报错文本）")
+            if os.path.exists(video_name):
+                with open(video_name, 'r', errors='ignore') as f:
+                    print("--- 🔍 网盘拦截内容预览 ---")
+                    print(f.read()[:500])
+                    print("----------------------------")
             sys.exit(1)
 
         file_size_mb = os.path.getsize(video_name) / (1024 * 1024)
