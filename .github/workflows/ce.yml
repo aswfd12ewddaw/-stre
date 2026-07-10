@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: '请输入网盘直链 (如用 cURL 请务必删掉回车变成单行)'
+        description: '请输入网盘直链 (如用 cURL 请务必删掉所有回车变成单行)'
         required: true
         default: ''
       video_name:
@@ -48,9 +48,6 @@ jobs:
         if not video_name.lower().endswith('.mp4'):
             video_name += '.mp4'
 
-        # ----------------------------------------------------------------
-        # 🔍 【第一步】：Streamtape 通信预检 (Pre-flight Check)
-        # ----------------------------------------------------------------
         print("🕵️ 正在启动 Pre-flight Check，测试当前虚拟机与 Streamtape 的连通性...")
         try:
             api_ping = subprocess.check_output(
@@ -120,7 +117,6 @@ jobs:
         if not has_ua:
             aria2_cmd.extend(['--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'])
         
-        # 自动补全阿里云盘 Referer（专门防 400 / SignatureDoesNotMatch 拦截）
         has_referer = any(h.lower().startswith("referer:") for h in aria2_headers)
         if not has_referer:
             if "aliyundrive.cloud" in target_url or "alipan.com" in target_url:
@@ -136,13 +132,14 @@ jobs:
         aria2_cmd.append(target_url)
         subprocess.run(aria2_cmd, check=True)
 
-        if not os.path.exists(video_name) or os.path.getsize(video_name) < 1024:
-            print("❌ 错误：视频文件下载失败！（文件小于 1KB，可能是被网盘拦截返回了报错文本）")
+        if not os.path.exists(video_name) or os.path.getsize(video_name) < 5 * 1024 * 1024:
+            file_size = os.path.getsize(video_name) if os.path.exists(video_name) else 0
+            print(f"❌ 错误：视频文件下载异常！（文件大小仅为 {file_size} 字节，肯定是触发了网盘防盗链，返回了报错信息）")
             if os.path.exists(video_name):
                 with open(video_name, 'r', errors='ignore') as f:
-                    print("--- 🔍 网盘拦截内容预览 ---")
-                    print(f.read()[:500])
-                    print("----------------------------")
+                    print("\n--- 🔍 致命：网盘拦截原始报错内容 ---")
+                    print(f.read()[:2000])
+                    print("--------------------------------------\n")
             sys.exit(1)
 
         file_size_mb = os.path.getsize(video_name) / (1024 * 1024)
