@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: '请输入夸克直链或整段 cURL 下载命令'
+        description: '请输入直链或整段 cURL 下载命令 (右键复制为 cURL)'
         required: true
         default: ''
       video_name:
@@ -20,18 +20,14 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 【终极优化】：彻底抛弃耗时的源码编译与缓存，直接秒拉取已编译好的 128 线程解锁版！
     - name: ⚡ Install Pre-compiled Unlocked Aria2 (Instant)
       run: |
         echo "🚀 正在秒级拉取免编译的静态 Aria2-Pro-Core（128 线程全解锁版）..."
-        # 极速下载静态编译的二进制文件，无需任何额外依赖
         wget -qO aria2.tar.gz "https://github.com/P3TERX/Aria2-Pro-Core/releases/download/1.36.0_2021.08.22/aria2-1.36.0-static-linux-amd64.tar.gz"
         tar -xzf aria2.tar.gz
-        
-        # 部署到系统路径
         sudo mv aria2c /usr/local/bin/aria2c-git
         sudo chmod +x /usr/local/bin/aria2c-git
-        echo "✅ 真正的 128 线程解锁版部署完成！耗时不到 2 秒！"
+        echo "✅ 真正的 128 线程解锁版部署完成！"
 
     - name: Create Python Script File
       run: |
@@ -63,7 +59,6 @@ jobs:
             
             if "403 Forbidden" in api_ping or "Cloudflare" in api_ping and "error" in api_ping.lower():
                 print("❌ 预检失败：检测到 Streamtape 当前正对 GitHub 该节点 IP 进行严厉风控熔断 (403)！")
-                print("💡 为了防止白费力气，任务已安全终止。请稍后重新运行或更换 Actions 区域。")
                 sys.exit(1)
             elif "\"status\":200" in api_ping.replace(" ", ""):
                 print("✅ 连通性预检通过！测试通道顺畅，账号密钥验证成功。")
@@ -75,19 +70,31 @@ jobs:
             print(f"⚠️ 预检通信出现异常: {e}，尝试继续...")
 
         # ----------------------------------------------------------------
-        # 📥 【第二步】：预检通过后，再去启动 Aria2 下载
+        # 📥 【第二步】：智能解析 cURL 参数并启动 Aria2
         # ----------------------------------------------------------------
         target_url = ""
-        cookie_str = ""
+        aria2_headers = []
 
         if raw_input.startswith("curl"):
-            print("🚀 检测到您输入的是整段 cURL 命令，正在智能提取关键参数...")
-            url_match = re.search(r'(https?://[^\s"\']+)', raw_input)
+            print("🚀 检测到您输入的是整段 cURL 命令，正在智能提取并完美复刻浏览器参数...")
+            # 1. 提取 URL
+            url_match = re.search(r"(https?://[^\s'\"]+)", raw_input)
             if url_match:
                 target_url = url_match.group(1)
-            cookie_match = re.search(r'(?:-b|--cookie)\s+["\']?([^"\']+)["\']?', raw_input)
+            
+            # 2. 提取所有 Header，剔除会导致 400 Bad Request 的冲突头部
+            headers = re.findall(r"(?:-H|--header)\s+['\"](.*?)['\"]", raw_input)
+            for h in headers:
+                h_lower = h.lower()
+                # 剔除 HTTP/2 伪头部 (authority 等)、压缩编码和 Range 冲突
+                if h_lower.startswith("range:") or h_lower.startswith("authority:") or h_lower.startswith(":") or h_lower.startswith("accept-encoding:"):
+                    continue
+                aria2_headers.append(h)
+            
+            # 3. 提取 Cookie (独立参数)
+            cookie_match = re.search(r"(?:-b|--cookie)\s+['\"](.*?)['\"]", raw_input)
             if cookie_match:
-                cookie_str = cookie_match.group(1)
+                aria2_headers.append(f"Cookie: {cookie_match.group(1)}")
         else:
             target_url = raw_input
 
@@ -98,11 +105,15 @@ jobs:
         print("📥 正在启动【Aria2-Pro 静态解锁版】开启 64 线程暴力冲锋...")
         aria2_cmd = [
             'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
-            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             '-o', video_name
         ]
-        if cookie_str:
-            aria2_cmd.append(f'--header=Cookie: {cookie_str}')
+        
+        has_ua = any(h.lower().startswith("user-agent:") for h in aria2_headers)
+        if not has_ua:
+            aria2_cmd.extend(['--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'])
+            
+        for h in aria2_headers:
+            aria2_cmd.append(f"--header={h}")
             
         aria2_cmd.append(target_url)
         subprocess.run(aria2_cmd, check=True)
