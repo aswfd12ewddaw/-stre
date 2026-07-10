@@ -34,13 +34,13 @@ jobs:
         import subprocess
         import json
         import urllib.request
+        import urllib.parse
         import shlex
 
         raw_input = os.environ['RAW_INPUT'].strip()
         st_login = os.environ['ST_LOGIN']
         st_key = os.environ['ST_KEY']
         
-        # 建立独立下载舱，确保里面只有这一个我们刚刚下载的文件
         download_dir = "downloads"
         os.makedirs(download_dir, exist_ok=True)
 
@@ -103,8 +103,39 @@ jobs:
             print("❌ 错误：无法从输入中提取到有效的视频 URL 链接！")
             sys.exit(1)
 
-        print("📥 正在启动【Aria2-Pro 静态解锁版】自动嗅探原文件名，并开启 64 线程暴力冲锋...")
-        # 去掉手动 -o，改用 -d 指定目录，让 aria2 自动解析原文件名
+        # ----------------------------------------------------------------
+        # 🛡️ 【绝杀技】：智能提取真正的中文文件名，对抗一切掉字乱码
+        # ----------------------------------------------------------------
+        true_name = ""
+        parsed_url = urllib.parse.urlparse(target_url)
+        qs = urllib.parse.parse_qs(parsed_url.query)
+        for k, v in qs.items():
+            if k.lower() == 'response-content-disposition':
+                cd = v[0]
+                m1 = re.search(r"filename\*=UTF-8''([^;&]+)", cd, re.IGNORECASE)
+                if m1:
+                    true_name = urllib.parse.unquote(m1.group(1))
+                    break
+                m2 = re.search(r'filename="([^"]+)"', cd, re.IGNORECASE)
+                if m2:
+                    true_name = urllib.parse.unquote(m2.group(1))
+                    break
+                    
+        if not true_name:
+            basename = urllib.parse.unquote(os.path.basename(parsed_url.path))
+            if basename and '.' in basename:
+                true_name = basename
+
+        if not true_name:
+            true_name = "Downloaded_Video"
+            
+        valid_exts = ('.mp4', '.mkv', '.avi', '.ts', '.mov', '.flv')
+        if not any(true_name.lower().endswith(ext) for ext in valid_exts):
+            true_name += '.mp4'
+            
+        print(f"✨ 独家黑科技：已从深层链接中完美提取真实的中文名: 【{true_name}】")
+
+        print("📥 正在启动【Aria2-Pro 静态解锁版】开启 64 线程暴力冲锋...")
         aria2_cmd = [
             'aria2c-git', '-s', '64', '-x', '64', '--min-split-size=1M', '-k', '1M',
             '-d', download_dir, '--content-disposition-default-utf8=true'
@@ -129,7 +160,6 @@ jobs:
         aria2_cmd.append(target_url)
         subprocess.run(aria2_cmd, check=True)
 
-        # 获取下载舱里的唯一文件
         downloaded_files = [f for f in os.listdir(download_dir) if not f.endswith('.aria2')]
         if not downloaded_files:
             print("❌ 错误：下载舱为空，视频文件下载失败或被拦截！")
@@ -141,23 +171,21 @@ jobs:
         if os.path.getsize(file_path) < 5 * 1024 * 1024:
             file_size = os.path.getsize(file_path)
             print(f"❌ 错误：视频文件下载异常！（文件大小仅为 {file_size} 字节，肯定是触发了网盘防盗链，返回了报错信息）")
-            with open(file_path, 'r', errors='ignore') as f:
-                print("\n--- 🔍 致命：网盘拦截原始报错内容 ---")
-                print(f.read()[:2000])
-                print("--------------------------------------\n")
+            if os.path.exists(file_path):
+                with open(file_path, 'r', errors='ignore') as f:
+                    print("\n--- 🔍 致命：网盘拦截原始报错内容 ---")
+                    print(f.read()[:2000])
+                    print("--------------------------------------\n")
             sys.exit(1)
             
-        # 兜底：如果有些网盘直链太原始没有吐出带后缀的名字，为了上传后能顺利识别，强制补个 .mp4
-        final_name = original_name
-        valid_exts = ('.mp4', '.mkv', '.avi', '.ts', '.mov', '.flv')
-        if not any(final_name.lower().endswith(ext) for ext in valid_exts):
-            final_name += '.mp4'
-            new_path = os.path.join(download_dir, final_name)
-            os.rename(file_path, new_path)
-            file_path = new_path
+        # 强制用我们提取到的完美中文名覆盖 Aria2 乱搞的名字
+        final_path = os.path.join(download_dir, true_name)
+        if file_path != final_path:
+            os.rename(file_path, final_path)
+            file_path = final_path
 
         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        print(f"🎯 文件下载完成！【自动识别的原文件名为: {final_name}】，本地大小: {file_size_mb:.2f} MB")
+        print(f"🎯 文件下载完成！【自动强力修复文件名为: {true_name}】，本地大小: {file_size_mb:.2f} MB")
 
         # ----------------------------------------------------------------
         # 📦 【第三步】：获取真实上传节点并推流
@@ -187,7 +215,28 @@ jobs:
             print("---------------------------------")
             
             if "status\":200" in upload_res_raw.replace(" ", "") or "files" in upload_res_raw:
-                print(f"🎉 恭喜！《{final_name}》 已完美跨越限流同步至 Streamtape 空间！")
+                print(f"🎉 恭喜！文件已成功推送到 Streamtape！")
+                
+                # --- 终极绝杀：检测服务器是否吃了中文，如果吃了就强行写回去 ---
+                try:
+                    up_json = json.loads(upload_res_raw)
+                    if up_json.get('status') == 200 and 'result' in up_json and 'id' in up_json['result']:
+                        file_id = up_json['result']['id']
+                        st_name = up_json['result'].get('name', '')
+                        if st_name != true_name:
+                            print(f"🔄 警报：检测到 Streamtape 服务器偷偷把中文名吃掉了 (变成了 {st_name})！")
+                            print("⚔️ 正在使用黑客级 API 直接攻击数据库强制覆写中文名...")
+                            rename_url = f"https://api.streamtape.com/file/rename?login={st_login}&key={st_key}&file={file_id}&name={urllib.parse.quote(true_name)}"
+                            rename_req = urllib.request.Request(rename_url, headers={'User-Agent': 'Mozilla/5.0'})
+                            with urllib.request.urlopen(rename_req) as rename_res:
+                                rename_json = json.loads(rename_res.read().decode('utf-8'))
+                                if rename_json.get('status') == 200:
+                                    print(f"✅ 【大获全胜】中文名强制修复成功！这下彻底是 《{true_name}》 了！")
+                                else:
+                                    print("⚠️ 尝试修复中文名失败（不影响播放）")
+                except Exception as e:
+                    print(f"⚠️ 强制覆写中文名时遇到小插曲: {e}")
+
             else:
                 print("⚠️ 接口返回未预期内容，请去后台网页端确认文件是否已在。")
                 
