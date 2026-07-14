@@ -40,6 +40,7 @@ jobs:
         import urllib.request
         import urllib.parse
         import shlex
+        import time
 
         raw_input = os.environ.get('RAW_INPUT', '').strip()
         folder_name = os.environ.get('FOLDER_NAME', '').strip()
@@ -67,23 +68,42 @@ jobs:
             print(f"⚠️ 预检通信出现异常: {e}，尝试继续...")
 
         # ==========================================
-        # 📂 处理文件夹逻辑
+        # 📂 处理文件夹逻辑 (智能查重版)
         # ==========================================
         target_folder_id = ""
         if folder_name:
-            print(f"\n📁 检测到您要求创建文件夹: 【{folder_name}】")
-            create_url = f"https://api.streamtape.com/file/createfolder?login={st_login}&key={st_key}&name={urllib.parse.quote(folder_name)}"
+            print(f"\n📁 检测到您要求传至文件夹: 【{folder_name}】")
+            # 第一步：先检查该文件夹是否已经存在
+            list_url = f"https://api.streamtape.com/file/listfolder?login={st_login}&key={st_key}"
+            folder_exists = False
             try:
-                req = urllib.request.Request(create_url, headers={'User-Agent': 'Mozilla/5.0'})
+                req = urllib.request.Request(list_url, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req) as response:
                     res_json = json.loads(response.read().decode('utf-8'))
-                    if res_json.get('status') == 200 and 'result' in res_json and 'folderid' in res_json['result']:
-                        target_folder_id = res_json['result']['folderid']
-                        print(f"✅ 文件夹在云端创建成功！专属归档 ID: {target_folder_id}")
-                    else:
-                        print("⚠️ 创建文件夹失败，将退回至根目录上传。返回：", res_json)
+                    if res_json.get('status') == 200 and 'result' in res_json and 'folders' in res_json['result']:
+                        for f in res_json['result']['folders']:
+                            if f.get('name') == folder_name:
+                                target_folder_id = f.get('id')
+                                folder_exists = True
+                                print(f"✅ 找到已存在的目标文件夹，专属归档 ID: {target_folder_id}")
+                                break
             except Exception as e:
-                print(f"⚠️ 创建文件夹异常: {e}，退回根目录。")
+                print(f"⚠️ 查询文件夹列表异常: {e}")
+
+            # 第二步：如果不存在，再执行创建命令 (解决同名创建报 500 错的问题)
+            if not folder_exists:
+                create_url = f"https://api.streamtape.com/file/createfolder?login={st_login}&key={st_key}&name={urllib.parse.quote(folder_name)}"
+                try:
+                    req = urllib.request.Request(create_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req) as response:
+                        res_json = json.loads(response.read().decode('utf-8'))
+                        if res_json.get('status') == 200 and 'result' in res_json and 'folderid' in res_json['result']:
+                            target_folder_id = res_json['result']['folderid']
+                            print(f"✅ 文件夹在云端创建成功！专属归档 ID: {target_folder_id}")
+                        else:
+                            print("⚠️ 创建文件夹失败，将退回至根目录上传。返回：", res_json)
+                except Exception as e:
+                    print(f"⚠️ 创建文件夹异常: {e}，退回根目录。")
 
         # ==========================================
         # 📥 解析多任务列表
@@ -244,52 +264,79 @@ jobs:
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
             print(f"🎯 极速下载完成！本地大小: {file_size_mb:.2f} MB")
 
-            # --- 自动归档与推送 ---
-            api_ul_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
-            if target_folder_id:
-                api_ul_url += f"&folder={target_folder_id}"
-                
-            try:
-                req = urllib.request.Request(api_ul_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as response:
-                    api_res = json.loads(response.read().decode('utf-8'))
+            # --- 自动归档与推送 (带防抽风重试机制) ---
+            max_retries = 3
+            upload_success = False
+            
+            for attempt in range(max_retries):
+                if attempt > 0:
+                    print(f"⏳ 正在进行第 {attempt + 1} 次重试 (为防止节点连坐，重新向总调度申请新节点)...")
+                    time.sleep(5)
+
+                api_ul_url = f"https://api.streamtape.com/file/ul?login={st_login}&key={st_key}"
+                if target_folder_id:
+                    api_ul_url += f"&folder={target_folder_id}"
                     
-                if api_res.get('status') != 200 or 'result' not in api_res or 'url' not in api_res['result']:
-                    print(f"❌ 无法获取上传节点 URL。")
-                    fail_count += 1
-                    continue
+                try:
+                    req = urllib.request.Request(api_ul_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req) as response:
+                        api_res = json.loads(response.read().decode('utf-8'))
+                        
+                    if api_res.get('status') != 200 or 'result' not in api_res or 'url' not in api_res['result']:
+                        print(f"❌ 无法获取上传节点 URL。")
+                        continue
+                        
+                    upload_url = api_res['result']['url']
+                    print(f"🚀 正在上传至云端节点: {upload_url.split('/')[2]} ...")
                     
-                upload_url = api_res['result']['url']
-                print(f"🚀 正在上传至云端节点...")
-                
-                upload_cmd = ['curl', '-#', '-F', f'file=@{file_path}', upload_url]
-                upload_res_raw = subprocess.check_output(upload_cmd).decode('utf-8')
-                
-                if "status\":200" in upload_res_raw.replace(" ", "") or "files" in upload_res_raw:
-                    print(f"🎉 任务 {idx} 《{true_name}》 推送成功！")
+                    # 使用 subprocess.run 捕获异常，并加上 1800 秒超时限制防止 GitHub 无限扣时长
+                    upload_cmd = ['curl', '-#', '-m', '1800', '-F', f'file=@{file_path}', upload_url]
+                    process = subprocess.run(upload_cmd, check=True, capture_output=True, text=True)
+                    upload_res_raw = process.stdout
                     
-                    # 数据库级中文名防御
-                    try:
-                        up_json = json.loads(upload_res_raw)
-                        if up_json.get('status') == 200 and 'result' in up_json and 'id' in up_json['result']:
-                            file_id = up_json['result']['id']
-                            st_name = up_json['result'].get('name', '')
-                            if st_name != true_name:
-                                print(f"⚔️ 触发 API 防御：强行将服务器丢失的中文字符重写回来...")
-                                rename_url = f"https://api.streamtape.com/file/rename?login={st_login}&key={st_key}&file={file_id}&name={urllib.parse.quote(true_name)}"
-                                rename_req = urllib.request.Request(rename_url, headers={'User-Agent': 'Mozilla/5.0'})
-                                with urllib.request.urlopen(rename_req) as rename_res:
-                                    pass
-                    except Exception as e:
-                        print(f"⚠️ 中文名覆写失败: {e}")
-                    
-                    success_count += 1
-                else:
-                    print(f"⚠️ 任务 {idx} 上传结果疑似异常，请去网页核对。")
-                    fail_count += 1
-                    
-            except Exception as e:
-                print(f"❌ 任务 {idx} 推送时断开: {e}")
+                    if "status\":200" in upload_res_raw.replace(" ", "") or "files" in upload_res_raw:
+                        print(f"🎉 任务 {idx} 《{true_name}》 推送成功！")
+                        upload_success = True
+                        
+                        # 解析并输出终极直链 & 中文名防御
+                        try:
+                            up_json = json.loads(upload_res_raw)
+                            if up_json.get('status') == 200 and 'result' in up_json and 'id' in up_json['result']:
+                                file_id = up_json['result']['id']
+                                
+                                # 提取终极播放直链
+                                final_link = up_json['result'].get('url', '')
+                                if not final_link: # 备用拼接方案
+                                    final_link = f"https://streamtape.com/v/{file_id}/"
+                                
+                                print("\n" + "="*40)
+                                print(f"🔗 拿到终极直链啦！请复制下方链接：")
+                                print(f"👉 {final_link}")
+                                print("="*40 + "\n")
+
+                                st_name = up_json['result'].get('name', '')
+                                if st_name != true_name:
+                                    print(f"⚔️ 触发 API 防御：强行将服务器丢失的中文字符重写回来...")
+                                    rename_url = f"https://api.streamtape.com/file/rename?login={st_login}&key={st_key}&file={file_id}&name={urllib.parse.quote(true_name)}"
+                                    rename_req = urllib.request.Request(rename_url, headers={'User-Agent': 'Mozilla/5.0'})
+                                    with urllib.request.urlopen(rename_req) as rename_res:
+                                        pass
+                        except Exception as e:
+                            print(f"⚠️ 提取链接或覆写名称失败: {e}")
+                        
+                        break # 成功了跳出重试循环
+                    else:
+                        print(f"⚠️ 任务 {idx} 上传结果疑似异常，服务器返回：{upload_res_raw}")
+                        
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ curl 推送时断开 (错误码 {e.returncode}): 该节点可能宕机或超时。")
+                except Exception as e:
+                    print(f"❌ 获取节点或请求异常: {e}")
+
+            if upload_success:
+                success_count += 1
+            else:
+                print(f"❌ 任务 {idx} 重试次数耗尽，彻底失败。")
                 fail_count += 1
                 
         print("\n" + "*"*60)
